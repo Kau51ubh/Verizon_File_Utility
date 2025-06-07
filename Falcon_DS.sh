@@ -1,166 +1,148 @@
 #!/bin/bash
 
-#
-# Falcon_DS.sh
-#
-# Usage:
-#    Falcon_DS.sh JOB_NAME REL_PATH1 REL_PATH2 DELIMITER WIDTHS TIMESTAMP
-#
-#   - JOB_NAME:     e.g. "Multi_File_Validation"
-#   - REL_PATH1:    e.g. "td_inbound/TD_FILE.txt"    (inside bucket vz-fstexp)
-#   - REL_PATH2:    e.g. "bq_inbound/BQ_FILE.txt"    (inside bucket vz-outbound)
-#   - DELIMITER:    e.g. "|", "!|", ",", "\t", or " "     (no quotes)
-#   - WIDTHS:       (currently unused; pass empty string "")
-#   - TIMESTAMP:    e.g. "20250607_003000"
-#
-# Buckets are mounted by GCSFuse at:
-#   /mnt/bucket_td   → vz-fstexp
-#   /mnt/bucket_bq   → vz-outbound
-#
+set -e
 
-# Read positional arguments
 JOB_NAME="$1"
-REL_PATH1="$2"
-REL_PATH2="$3"
-DELIMITER="$4"
+TD_FILE="$2"
+BQ_FILE="$3"
+DELIM="$4"
 WIDTHS="$5"
-TIMESTAMP="$6"
+TS="$6"
 
-# Build absolute paths
-FILE1_PATH="/mnt/bucket_td/${REL_PATH1}"
-FILE2_PATH="/mnt/bucket_bq/${REL_PATH2}"
+# These should point to the correct GCSFuse mount locations!
+TD_PATH="/mnt/bucket_td/$TD_FILE"
+BQ_PATH="/mnt/bucket_bq/$BQ_FILE"
 
-# Output directory under vz-outbound/logs
-BASE_OUTPUT_DIR="/mnt/bucket_bq/logs/${JOB_NAME}_${TIMESTAMP}"
-mkdir -p "$BASE_OUTPUT_DIR"
+# Output log and summary directory (change as needed)
+LOG_DIR="/mnt/bucket_bq/logs/${JOB_NAME}_${TS}"
+mkdir -p "$LOG_DIR"
+HTML_FILE="$LOG_DIR/${JOB_NAME}_summary.html"
 
-# All stdout/stderr → output log
-OUTPUT_LOG="$BASE_OUTPUT_DIR/${JOB_NAME}_output.log"
-exec > >(tee -a "$OUTPUT_LOG") 2>&1
+# --- LOG ENV ---
+echo "========== Script start =========="
+echo "PWD: $PWD"
+echo "USER: $(whoami)"
+echo "ARGS: $@"
+echo "ENVIRONMENT:"
+env
 
-echo "----------------------------------------"
-echo "Starting comparison at $(date '+%Y-%m-%d %H:%M:%S')"
-echo "JOB_NAME       : $JOB_NAME"
-echo "FILE1_PATH     : $FILE1_PATH"
-echo "FILE2_PATH     : $FILE2_PATH"
-echo "DELIMITER      : '$DELIMITER'"
-echo "WIDTHS (unused): '$WIDTHS'"
-echo "TIMESTAMP      : $TIMESTAMP"
-echo "Output Dir     : $BASE_OUTPUT_DIR"
-echo "----------------------------------------"
+echo "Job Name   : $JOB_NAME"
+echo "TD File    : $TD_FILE"
+echo "BQ File    : $BQ_FILE"
+echo "Delimiter  : $DELIM"
+echo "Widths     : $WIDTHS"
+echo "Timestamp  : $TS"
 
-# 1) Verify both files exist
-if [ ! -f "$FILE1_PATH" ] || [ ! -f "$FILE2_PATH" ]; then
-  echo "ERROR: One or both input files do not exist."
-  echo "       $FILE1_PATH"
-  echo "       $FILE2_PATH"
-  exit 1
+# --- Existence Check ---
+if [[ ! -f "$TD_PATH" ]]; then
+    echo "[ERROR] TD file not found: $TD_PATH"
+    exit 1
+fi
+if [[ ! -f "$BQ_PATH" ]]; then
+    echo "[ERROR] BQ file not found: $BQ_PATH"
+    exit 1
 fi
 
-# 2) Extract headers (first line)
-TD_HEADER=$(head -n 1 "$FILE1_PATH")
-BQ_HEADER=$(head -n 1 "$FILE2_PATH")
+echo "TD file exists? $(ls -lh "$TD_PATH")"
+echo "BQ file exists? $(ls -lh "$BQ_PATH")"
 
-# 3) Split headers into arrays by the raw DELIMITER
-IFS="$DELIMITER" read -ra TD_COLUMNS <<< "$TD_HEADER"
-IFS="$DELIMITER" read -ra BQ_COLUMNS <<< "$BQ_HEADER"
+# --- Preview first lines for debug ---
+echo "First 2 lines of TD file:"
+head -2 "$TD_PATH"
+echo "First 2 lines of BQ file:"
+head -2 "$BQ_PATH"
 
-TD_ROW_COUNT=$(tail -n +2 "$FILE1_PATH" | wc -l | awk '{print $1}')
-BQ_ROW_COUNT=$(tail -n +2 "$FILE2_PATH" | wc -l | awk '{print $1}')
+# --- Header Extraction ---
+td_header=$(head -1 "$TD_PATH" | tr -d '\r\n')
+bq_header=$(head -1 "$BQ_PATH" | tr -d '\r\n')
 
-TD_COL_COUNT=${#TD_COLUMNS[@]}
-BQ_COL_COUNT=${#BQ_COLUMNS[@]}
+# --- Column Counts & Headers ---
+readarray -t td_cols < <(awk -F'!\\|' '{for(i=1;i<=NF;i++) print $i}' <<< "$td_header")
+readarray -t bq_cols < <(awk -F'!\\|' '{for(i=1;i<=NF;i++) print $i}' <<< "$bq_header")
 
-echo "TD Rows: $TD_ROW_COUNT | TD Cols: $TD_COL_COUNT"
-echo "BQ Rows: $BQ_ROW_COUNT | BQ Cols: $BQ_COL_COUNT"
+td_col_count=${#td_cols[@]}
+bq_col_count=${#bq_cols[@]}
 
-# 4) Find missing columns (alphabetically sorted compare)
-printf "%s\n" "${TD_COLUMNS[@]}" | sort > /tmp/td_cols_sorted.txt
-printf "%s\n" "${BQ_COLUMNS[@]}" | sort > /tmp/bq_cols_sorted.txt
+# --- Row Counts (minus header) ---
+td_row_count=$(($(wc -l < "$TD_PATH") - 1))
+bq_row_count=$(($(wc -l < "$BQ_PATH") - 1))
 
-# Columns in TD but not in BQ
-TD_MISSING=$(comm -23 /tmp/td_cols_sorted.txt /tmp/bq_cols_sorted.txt | paste -sd "," -)
-# Columns in BQ but not in TD
-BQ_MISSING=$(comm -13 /tmp/td_cols_sorted.txt /tmp/bq_cols_sorted.txt | paste -sd "," -)
+# --- Column Comparison ---
+missing_in_bq=()
+passed_columns=()
+for col in "${td_cols[@]}"; do
+    if [[ " ${bq_cols[*]} " == *" $col "* ]]; then
+        passed_columns+=("$col")
+    else
+        missing_in_bq+=("$col")
+    fi
+done
 
-[ -z "$TD_MISSING" ] && TD_MISSING="None"
-[ -z "$BQ_MISSING" ] && BQ_MISSING="None"
+missing_in_td=()
+for col in "${bq_cols[@]}"; do
+    if [[ " ${td_cols[*]} " != *" $col "* ]]; then
+        missing_in_td+=("$col")
+    fi
+done
 
-# 5) Header validation
-HEADER_VALIDATION="PASS"
-if [ "$TD_HEADER" != "$BQ_HEADER" ]; then
-  HEADER_VALIDATION="FAIL"
+# --- Mismatched Columns ---
+mismatched_columns="N/A"
+if [[ ${#missing_in_bq[@]} -gt 0 || ${#missing_in_td[@]} -gt 0 ]]; then
+    mismatched_columns=""
+    [[ ${#missing_in_bq[@]} -gt 0 ]] && mismatched_columns+="Missing in BQ: ${missing_in_bq[*]} "
+    [[ ${#missing_in_td[@]} -gt 0 ]] && mismatched_columns+="Missing in TD: ${missing_in_td[*]}"
 fi
 
-# 6) Count validation
-COUNT_VALIDATION="PASS"
-if [ "$TD_ROW_COUNT" -ne "$BQ_ROW_COUNT" ] || [ "$TD_COL_COUNT" -ne "$BQ_COL_COUNT" ]; then
-  COUNT_VALIDATION="FAIL"
+# --- Passed Columns as CSV, remove double commas ---
+passed_columns_csv=$(printf "%s," "${passed_columns[@]}")
+passed_columns_csv="${passed_columns_csv%,}"
+
+# --- Validations ---
+header_status="FAIL"
+[[ "$td_header" == "$bq_header" ]] && header_status="PASS"
+
+count_status="FAIL"
+[[ "$td_row_count" == "$bq_row_count" ]] && count_status="PASS"
+
+td_ext="${TD_FILE##*.}"
+bq_ext="${BQ_FILE##*.}"
+ext_status="FAIL"
+[[ "$td_ext" == "$bq_ext" ]] && ext_status="PASS"
+
+td_checksum=$(md5sum "$TD_PATH" | awk '{print $1}')
+bq_checksum=$(md5sum "$BQ_PATH" | awk '{print $1}')
+checksum_status="FAIL"
+[[ "$td_checksum" == "$bq_checksum" ]] && checksum_status="PASS"
+
+overall_status="FAIL"
+if [[ "$header_status" == "PASS" && "$count_status" == "PASS" && "$ext_status" == "PASS" && "$checksum_status" == "PASS" ]]; then
+  overall_status="PASS"
 fi
 
-# 7) Checksum validation (MD5)
-TD_CHECKSUM=$(md5sum "$FILE1_PATH" | awk '{print $1}')
-BQ_CHECKSUM=$(md5sum "$FILE2_PATH" | awk '{print $1}')
-CHECKSUM_VALIDATION="PASS"
-if [ "$TD_CHECKSUM" != "$BQ_CHECKSUM" ]; then
-  CHECKSUM_VALIDATION="FAIL"
+count_variance="N/A"
+if [[ "$td_row_count" -ne 0 ]]; then
+    count_variance=$(awk -v t="$td_row_count" -v b="$bq_row_count" 'BEGIN{printf "%.2f%%", t==0?0:(t-b)/t*100}')
 fi
 
-# 8) Extension validation
-TD_EXT="${FILE1_PATH##*.}"
-BQ_EXT="${FILE2_PATH##*.}"
-EXT_VALIDATION="PASS"
-if [ "$TD_EXT" != "$BQ_EXT" ]; then
-  EXT_VALIDATION="FAIL"
-fi
-
-# 9) Count variance (relative to BQ)
-if [ "$BQ_ROW_COUNT" -ne 0 ]; then
-  COUNT_VARIANCE=$(awk -v t="$TD_ROW_COUNT" -v b="$BQ_ROW_COUNT" 'BEGIN { printf "%.2f%%", ((t - b)/b)*100 }')
-else
-  COUNT_VARIANCE="NA"
-fi
-
-# 10) Final status
-STATUS="PASS"
-if [[ "$HEADER_VALIDATION" != "PASS" ]] \
-  || [[ "$COUNT_VALIDATION" != "PASS" ]] \
-  || [[ "$CHECKSUM_VALIDATION" != "PASS" ]]; then
-  STATUS="FAIL"
-fi
-
-# 11) Passed columns (intersection)
-PASSED_COLS=$(comm -12 /tmp/td_cols_sorted.txt /tmp/bq_cols_sorted.txt | paste -sd "," -)
-[ -z "$PASSED_COLS" ] && PASSED_COLS="None"
-
-# 12) Mismatched columns (for now “None”)
-MISMATCHED_COLS="None"
-
-# 13) Generate HTML summary
-SUMMARY_HTML="$BASE_OUTPUT_DIR/${JOB_NAME}_summary.html"
-
-cat <<EOF > "$SUMMARY_HTML"
-<html>
-  <body>
-    <table border="1" cellpadding="6" cellspacing="0">
-      <tr><th>Job Name</th><td>$JOB_NAME</td></tr>
-      <tr><th>File Name</th><td>$(basename "$FILE1_PATH")</td></tr>
-      <tr><th>TD Row Count | Column Count | Missing Columns</th>
-          <td>$TD_ROW_COUNT | $TD_COL_COUNT | $TD_MISSING</td></tr>
-      <tr><th>BQ Row Count | Column Count | Missing Columns</th>
-          <td>$BQ_ROW_COUNT | $BQ_COL_COUNT | $BQ_MISSING</td></tr>
-      <tr><th>Count Variance</th><td>$COUNT_VARIANCE</td></tr>
-      <tr><th>Header Validation</th><td>$HEADER_VALIDATION</td></tr>
-      <tr><th>Count Validation</th><td>$COUNT_VALIDATION</td></tr>
-      <tr><th>File Extension Validation</th><td>$EXT_VALIDATION</td></tr>
-      <tr><th>Checksum Validation</th><td>$CHECKSUM_VALIDATION</td></tr>
-      <tr><th>Status</th><td>$STATUS</td></tr>
-      <tr><th>Passed Columns</th><td>$PASSED_COLS</td></tr>
-      <tr><th>Mismatched Columns</th><td>$MISMATCHED_COLS</td></tr>
-    </table>
-  </body>
-</html>
+# --- OUTPUT HTML SUMMARY ---
+cat <<EOF > "$HTML_FILE"
+<html><body>
+<table border="1" cellpadding="6" cellspacing="0">
+<tr><th>Job Name</th><td>${JOB_NAME}</td></tr>
+<tr><th>File Name</th><td>$(basename "$TD_FILE")</td></tr>
+<tr><th>TD Row Count | Column Count | Missing Columns</th><td>${td_row_count} | ${td_col_count} | ${missing_in_bq[*]:-None}</td></tr>
+<tr><th>BQ Row Count | Column Count | Missing Columns</th><td>${bq_row_count} | ${bq_col_count} | ${missing_in_td[*]:-None}</td></tr>
+<tr><th>Count Variance</th><td>${count_variance}</td></tr>
+<tr><th>Header Validation</th><td>${header_status}</td></tr>
+<tr><th>Count Validation</th><td>${count_status}</td></tr>
+<tr><th>File Extension Validation</th><td>${ext_status}</td></tr>
+<tr><th>Checksum Validation</th><td>${checksum_status}</td></tr>
+<tr><th>Status</th><td>${overall_status}</td></tr>
+<tr><th>Passed Columns</th><td>${passed_columns_csv}</td></tr>
+<tr><th>Mismatched Columns</th><td>${mismatched_columns}</td></tr>
+</table>
+</body></html>
 EOF
 
-echo "HTML Summary generated: $SUMMARY_HTML"
-exit 0
+echo "HTML Summary generated: $HTML_FILE"
+echo "========== Script complete =========="

@@ -1,73 +1,66 @@
-import subprocess
 import os
-from flask import Flask, request, jsonify
-from datetime import datetime
-from google.cloud import storage
+import subprocess
+import datetime
+import json
+import functions_framework
 
-app = Flask(__name__)
+@functions_framework.http
+def compare_files(request):
+    try:
+        data = request.get_json(force=True)
+        job_name = data.get("job_name", "Validation_Job")
+        file1 = data["file1"]
+        file2 = data["file2"]
+        delimiter = data.get("delimiter", ",")
+        widths = data.get("widths", "")
+        timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-@app.route("/", methods=["POST"])
-def compare_files(request):            # ← MUST accept `request`
-    # parse JSON
-    data = request.get_json(silent=True) or {}
+        # Extra logging for Cloud Run debug!
+        print("DEBUG: ENV:", dict(os.environ))
+        print("DEBUG: Files in /:", os.listdir("/"))
+        print("DEBUG: Files in /workspace:", os.listdir("/workspace"))
+        print(f"DEBUG: Running script with: job_name={job_name}, file1={file1}, file2={file2}, delimiter={delimiter}, widths={widths}, timestamp={timestamp}")
 
-    # required
-    if "file1" not in data or "file2" not in data:
-        return jsonify({
+        # Optionally check if files exist on mount (optional, since shell will check)
+        td_full = f"/mnt/bucket_td/{file1}"
+        bq_full = f"/mnt/bucket_bq/{file2}"
+        print(f"DEBUG: TD file exists? {os.path.exists(td_full)} {td_full}")
+        print(f"DEBUG: BQ file exists? {os.path.exists(bq_full)} {bq_full}")
+        if os.path.exists(td_full):
+            with open(td_full) as f: print("DEBUG: First lines of TD:", [next(f) for _ in range(3)])
+        if os.path.exists(bq_full):
+            with open(bq_full) as f: print("DEBUG: First lines of BQ:", [next(f) for _ in range(3)])
+
+        script = "/workspace/Falcon_DS.sh"
+        cmd = [
+            "bash", script,
+            job_name, file1, file2, delimiter, widths, timestamp
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        print("DEBUG: SCRIPT STDOUT:", proc.stdout)
+        print("DEBUG: SCRIPT STDERR:", proc.stderr)
+
+        resp = {
+            "status": "success" if proc.returncode == 0 else "failed",
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "html_summary": ""
+        }
+
+        # Look for HTML summary
+        for line in proc.stdout.splitlines():
+            if "HTML Summary generated:" in line:
+                path = line.split(":", 1)[1].strip()
+                if os.path.exists(path):
+                    with open(path) as h:
+                        resp["html_summary"] = h.read()
+                break
+
+        return (json.dumps(resp), 200, {"Content-Type": "application/json"})
+
+    except Exception as e:
+        print("DEBUG: Exception:", str(e))
+        return (json.dumps({
             "status": "failed",
-            "message": "Missing required 'file1' or 'file2'"
-        }), 400
-
-    job_name  = data.get("job_name", "Validation_Job")
-    file1     = data["file1"]
-    file2     = data["file2"]
-    delimiter = data.get("delimiter", ",")
-    widths    = data.get("widths", "")
-
-    # timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # call your shell script
-    script = "/workspace/Falcon_DS.sh"
-    cmd = [
-        "bash", script,
-        job_name,
-        file1,
-        file2,
-        delimiter,
-        widths,
-        timestamp
-    ]
-
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd="/workspace"
-    )
-
-    # find HTML summary path
-    html_path = ""
-    for line in proc.stdout.splitlines():
-        if line.startswith("HTML Summary generated:"):
-            html_path = line.split(":",1)[1].strip()
-            break
-
-    html_content = ""
-    if html_path and os.path.isfile(html_path):
-        with open(html_path) as f:
-            html_content = f.read()
-
-    return jsonify({
-        "status":      "success" if proc.returncode == 0 else "failed",
-        "stdout":      proc.stdout,
-        "stderr":      proc.stderr,
-        "html_summary": html_content
-    }), (200 if proc.returncode == 0 else 500)
-
-if __name__ == "__main__":
-    # Functions-Framework will actually ignore this when deployed,
-    # but it lets you run locally with `python main.py`
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+            "message": str(e)
+        }), 500, {"Content-Type": "application/json"})

@@ -2,74 +2,77 @@ from airflow import DAG
 from airflow.utils.dates import days_ago
 from airflow.providers.http.operators.http import HttpOperator
 from airflow.operators.python import PythonOperator
-import json, re
-
-def extract_and_log_summary(**context):
-    # 1) pull raw JSON text from the invoke task
-    raw = context['ti'].xcom_pull(task_ids='invoke_compare_function')
-    payload = json.loads(raw)
-    html = payload.get('html_summary','')
-
-    # helper to grab any <th>…</th><td>…</td> cell
-    def extract(label):
-        pat = rf'<th>{re.escape(label)}</th>\s*<td>(.*?)</td>'
-        m = re.search(pat, html, flags=re.DOTALL)
-        return m.group(1).strip() if m else ''
-
-    # parse a "X | Y | Z" cell into cleaned parts
-    def parse_triplet(cell):
-        parts = [p.strip() for p in cell.split('|')]
-        # ensure 3 elements
-        while len(parts)<3:
-            parts.append('')
-        row,col,missing = parts[:3]
-        # strip stray commas from missing
-        missing = missing.lstrip(',').strip()
-        if not missing:
-            missing = 'None'
-        return row, col, missing
-
-    td_cell = extract("TD Row Count | Column Count | Missing Columns")
-    bq_cell = extract("BQ Row Count | Column Count | Missing Columns")
-    td_row, td_col, td_missing = parse_triplet(td_cell)
-    bq_row, bq_col, bq_missing = parse_triplet(bq_cell)
-
-    # passed & mismatched columns lists
-    def clean_list(cell):
-        items = [c.strip() for c in cell.split(',') if c.strip()]
-        return ','.join(items) if items else 'None'
-
-    passed = clean_list(extract("Passed Columns"))
-    mismatched = clean_list(extract("Mismatched Columns"))
-
-    # now print in your exact format
-    print("\n===== GCS FILE COMPARISON SUMMARY =====")
-    print(f"{'Job Name' :35}: {extract('Job Name')}")
-    print(f"{'File Name' :35}: {extract('File Name')}")
-    print(f"{'TD Row | Columns | Missing' :35}: {td_row} | {td_col} | {td_missing}")
-    print(f"{'BQ Row | Columns | Missing' :35}: {bq_row} | {bq_col} | {bq_missing}")
-    print(f"{'Count Variance' :35}: {extract('Count Variance')}")
-    print(f"{'Header Validation' :35}: {extract('Header Validation')}")
-    print(f"{'Count Validation' :35}: {extract('Count Validation')}")
-    print(f"{'File Extension Validation' :35}: {extract('File Extension Validation')}")
-    print(f"{'Checksum Validation' :35}: {extract('Checksum Validation')}")
-    print(f"{'Status' :35}: {extract('Status')}")
-    print(f"{'Passed Columns' :35}: {passed}")
-    print(f"{'Mismatched Columns' :35}: {mismatched}")
-    print("="*40 + "\n")
+from bs4 import BeautifulSoup
 
 default_args = {
-    'owner':'airflow',
-    'start_date': days_ago(1),
-    'retries': 0,
+    "owner": "airflow",
+    "start_date": days_ago(1),
+    "retries": 0,
 }
 
+def extract_and_log_summary(**context):
+    ti = context["ti"]
+    resp = ti.xcom_pull(task_ids="invoke_compare_function")
+    html = resp.get("html_summary", "")
+    log = ti.log
+
+    log.info("===== GCS FILE COMPARISON SUMMARY =====")
+    if not html:
+        log.info("No HTML summary returned. Raw XCom: %s", resp)
+        for field in [
+            "Job Name", "File Name", "TD Row Count | Column Count | Missing Columns",
+            "BQ Row Count | Column Count | Missing Columns", "Count Variance", "Header Validation",
+            "Count Validation", "File Extension Validation", "Checksum Validation", "Status",
+            "Passed Columns", "Mismatched Columns"
+        ]:
+            log.info(f"{field:45}: N/A")
+        log.info("="*40)
+        return
+
+    soup = BeautifulSoup(html, "html.parser")
+    summary = {}
+    for row in soup.find_all("tr"):
+        cols = row.find_all(["th", "td"])
+        if len(cols) == 2:
+            key = cols[0].get_text(strip=True)
+            val = cols[1].get_text(strip=True)
+            summary[key] = val
+
+    # Remove double commas and trailing commas in "Passed Columns"
+    passed_cols = summary.get("Passed Columns", "N/A")
+    passed_cols = passed_cols.replace(",,", ",")
+    if passed_cols.endswith(","):
+        passed_cols = passed_cols[:-1]
+
+    fields = [
+        ("Job Name", "Job Name"),
+        ("File Name", "File Name"),
+        ("TD Row Count | Column Count | Missing Columns", "TD Row Count | Column Count | Missing Columns"),
+        ("BQ Row Count | Column Count | Missing Columns", "BQ Row Count | Column Count | Missing Columns"),
+        ("Count Variance", "Count Variance"),
+        ("Header Validation", "Header Validation"),
+        ("Count Validation", "Count Validation"),
+        ("File Extension Validation", "File Extension Validation"),
+        ("Checksum Validation", "Checksum Validation"),
+        ("Status", "Status"),
+        ("Passed Columns", passed_cols),
+        ("Mismatched Columns", summary.get("Mismatched Columns", "N/A")),
+    ]
+
+    for label, key in fields:
+        val = key if label == "Passed Columns" else summary.get(key, "N/A")
+        if label == "Passed Columns":
+            val = passed_cols
+        log.info(f"{label:45}: {val}")
+
+    log.info("="*40)
+
 with DAG(
-    dag_id='compare_gcs_files_runtime_config',
+    dag_id="compare_gcs_files_runtime_config",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
-    tags=['gcs','file-compare']
+    tags=["gcs", "file-compare"],
 ) as dag:
 
     invoke_function = HttpOperator(
@@ -79,14 +82,15 @@ with DAG(
         method='POST',
         headers={"Content-Type":"application/json"},
         data="{{ dag_run.conf | tojson }}",
-        response_filter=lambda resp: resp.text,
+        response_filter=lambda r: r.json(),
         log_response=True,
+        do_xcom_push=True,
     )
 
-    extract_and_log = PythonOperator(
+    extract_summary = PythonOperator(
         task_id='extract_and_log_summary',
         python_callable=extract_and_log_summary,
         provide_context=True,
     )
 
-    invoke_function >> extract_and_log
+    invoke_function >> extract_summary
