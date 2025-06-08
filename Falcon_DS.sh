@@ -311,7 +311,7 @@ cat <<EOT > "$COLUMN_DETAIL_HTML"
   </style>
 </head>
 <body>
-<div class="hdr">Column-wise Data Mismatches (Sampled)</div>
+<div class="hdr">Sample Data Mismatch</div>
 EOT
 
 for mism_col in "${mismatched_columns[@]}"; do
