@@ -11,22 +11,39 @@ default_args = {
 }
 
 def extract_and_log_summary(**context):
+    import re
     ti = context["ti"]
     resp = ti.xcom_pull(task_ids="invoke_compare_function")
     html = resp.get("html_summary", "")
     log = ti.log
 
-    log.info("===== GCS FILE COMPARISON SUMMARY =====")
+    # ANSI color codes for log prettification
+    def colorize(text, color):
+        colors = {
+            "red": "\033[91m",
+            "green": "\033[92m",
+            "yellow": "\033[93m",
+            "cyan": "\033[96m",
+            "end": "\033[0m",
+        }
+        return f"{colors.get(color, '')}{text}{colors['end']}"
+
+    log.info("")
+    log.info("="*70)
+    log.info(colorize("               ★★  GCS FILE COMPARISON SUMMARY  ★★", "cyan"))
+    log.info("="*70)
+    log.info("")
+
     if not html:
-        log.info("No HTML summary returned. Raw XCom: %s", resp)
+        log.info(colorize("No HTML summary returned. Raw XCom: %s", "red"), resp)
         for field in [
             "Job Name", "File Name", "TD Row Count | Column Count | Missing Columns",
             "BQ Row Count | Column Count | Missing Columns", "Count Variance", "Header Validation",
             "Count Validation", "File Extension Validation", "Checksum Validation", "Status",
             "Passed Columns", "Mismatched Columns"
         ]:
-            log.info(f"{field:45}: N/A")
-        log.info("="*40)
+            log.info(f"{field:40}: N/A")
+        log.info("="*70)
         return
 
     soup = BeautifulSoup(html, "html.parser")
@@ -38,11 +55,27 @@ def extract_and_log_summary(**context):
             val = cols[1].get_text(strip=True)
             summary[key] = val
 
-    # Remove double commas and trailing commas in "Passed Columns"
-    passed_cols = summary.get("Passed Columns", "N/A")
-    passed_cols = passed_cols.replace(",,", ",")
+    # Beautify Passed Columns
+    passed_cols = summary.get("Passed Columns", "N/A").replace(",,", ",")
     if passed_cols.endswith(","):
         passed_cols = passed_cols[:-1]
+    # Break up long column lists for readability
+    def col_list(colstring):
+        cols = [c for c in colstring.split(",") if c.strip()]
+        if not cols:
+            return "N/A"
+        # Display as multi-line if more than 6 columns
+        if len(cols) > 6:
+            return "\n    " + ", ".join(cols)
+        return ", ".join(cols)
+
+    # Colorize pass/fail statuses
+    def color_status(val):
+        if isinstance(val, str) and val.strip().upper() == "PASS":
+            return colorize(val, "green")
+        if isinstance(val, str) and val.strip().upper() == "FAIL":
+            return colorize(val, "red")
+        return val
 
     fields = [
         ("Job Name", "Job Name"),
@@ -55,23 +88,37 @@ def extract_and_log_summary(**context):
         ("File Extension Validation", "File Extension Validation"),
         ("Checksum Validation", "Checksum Validation"),
         ("Status", "Status"),
-        ("Passed Columns", passed_cols),
-        ("Mismatched Columns", summary.get("Mismatched Columns", "N/A")),
+        ("Passed Columns", col_list(passed_cols)),
+        ("Mismatched Columns", col_list(summary.get("Mismatched Columns", "N/A"))),
     ]
 
     for label, key in fields:
         val = key if label == "Passed Columns" else summary.get(key, "N/A")
         if label == "Passed Columns":
-            val = passed_cols
-        log.info(f"{label:45}: {val}")
+            val = col_list(passed_cols)
+        if label == "Mismatched Columns":
+            val = col_list(summary.get("Mismatched Columns", "N/A"))
+        # Colorize for status fields
+        if label.endswith("Validation") or label == "Status":
+            val = color_status(val)
+        # Multi-line for columns
+        if isinstance(val, str) and "\n" in val:
+            log.info(f"{label:40}:")
+            for line in val.splitlines():
+                if line.strip():
+                    log.info(f"    {line}")
+        else:
+            log.info(f"{label:40}: {val}")
 
-    log.info("="*40)
+    log.info("")
+    log.info("="*70)
 
 with DAG(
     dag_id="compare_gcs_files_runtime_config",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
+    params={"dummy": "setme"},
     tags=["gcs", "file-compare"],
 ) as dag:
 

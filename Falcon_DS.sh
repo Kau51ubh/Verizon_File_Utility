@@ -41,8 +41,15 @@ bq_header=$(head -1 "$BQ_PATH" | tr -d '\r\n')
 # --- Dynamic awk field splitter (for multi-char DELIM) ---
 AWK_DELIM=$(printf '%s' "$DELIM" | sed 's/[]\/$*.^[]/\\&/g')
 
+# handling for TAB 
+if [[ "$DELIM" == "\\t" ]]; then
+  DELIM=$'\t'
+  AWK_DELIM="$DELIM"
+fi
+
 IFS=$'\n' read -d '' -r -a td_cols < <(echo "$td_header" | awk -F"$AWK_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
 IFS=$'\n' read -d '' -r -a bq_cols < <(echo "$bq_header" | awk -F"$AWK_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
+
 td_col_count=${#td_cols[@]}
 bq_col_count=${#bq_cols[@]}
 
