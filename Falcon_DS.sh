@@ -15,7 +15,6 @@ BQ_PATH="/mnt/bucket_bq/$BQ_FILE"
 LOG_DIR="/mnt/bucket_bq/logs/${JOB}_${TS}"
 mkdir -p "$LOG_DIR"
 SUMMARY_HTML="${LOG_DIR}/${JOB}_summary.html"
-MISMATCH_HTML="${LOG_DIR}/${JOB}_mismatched.html"
 
 FILENAME=$(basename "$TD_FILE")
 echo "========== Script start =========="
@@ -58,7 +57,6 @@ fi
 # ----------- EXTRACT COLUMNS -----------
 IFS=$'\n' read -d '' -r -a td_cols < <(echo "$td_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
 IFS=$'\n' read -d '' -r -a bq_cols < <(echo "$bq_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
-
 td_col_count=${#td_cols[@]}
 bq_col_count=${#bq_cols[@]}
 
@@ -132,7 +130,7 @@ passed_columns=()
 mismatched_columns=()
 if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROWS -eq $BQ_ROWS && "$HEADER_VAL" == "PASS" ]]; then
 
-    # If multi-char delimiter, preprocess whole files to TAB (without header)
+    # If multi-char delimiter, preprocess whole files to TAB
     TD_TEMP_DATA="$TD_PATH"
     BQ_TEMP_DATA="$BQ_PATH"
     if [[ "${#DELIM}" -gt 1 ]]; then
@@ -140,14 +138,13 @@ if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROW
       BQ_TEMP_DATA="${LOG_DIR}/BQ_TEMP_DATA.txt"
       tail -n +2 "$TD_PATH" | sed "s/${DELIM}/$'\t'/g" > "$TD_TEMP_DATA"
       tail -n +2 "$BQ_PATH" | sed "s/${DELIM}/$'\t'/g" > "$BQ_TEMP_DATA"
-      SPLIT_DELIM=$'\t'
+      SPLIT_DELIM=$'\t' 
     fi
 
     for ((col=1; col<=td_col_count; col++)); do
         td_col="${td_cols[$((col-1))]}"
         bq_col="${bq_cols[$((col-1))]}"
-
-        # Skip column if header mismatches
+        # Compare this column (skip if header mismatch)
         if [[ "$td_col" != "$bq_col" ]]; then
             mismatched_columns+=("$td_col")
             continue
@@ -186,7 +183,6 @@ if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROW
             else
                 mismatched_columns+=("$td_col")
             fi
-            rm -f "$td_col_file" "$bq_col_file"
         fi
     done
 else
@@ -208,7 +204,6 @@ for s in "$HEADER_VAL" "$COUNT_VAL" "$FILE_EXT_VAL" "$CHECKSUM_VAL"; do
     [[ "$s" == "FAIL" ]] && STATUS="FAIL" && break
 done
 
-# ----------- HTML SUMMARY --------------
 cat <<EOF > "$SUMMARY_HTML"
 <html><body>
 <table border="1" cellpadding="6" cellspacing="0">
@@ -243,139 +238,145 @@ echo "Status                                       : $STATUS"
 echo "Passed Columns                               : $PASSED_COLUMNS"
 echo "Mismatched Columns                           : $MISMATCHED_COLUMNS"
 
-# ----------- GENERATE INTERACTIVE MISMATCH REPORT (FULL ROW VIEW) -----------
-MISMATCH_HTML="${LOG_DIR}/${JOB}_mismatch_fullrow_report.html"
-MAX_SAMPLES=10
+COLUMN_DETAIL_HTML="${LOG_DIR}/${JOB}_column_mismatch_detail.html"
+MAX_SAMPLE=10
 
-if [[ ${#mismatched_columns[@]} -gt 0 ]]; then
-cat <<EOF > "$MISMATCH_HTML"
-<!DOCTYPE html>
+cat <<EOT > "$COLUMN_DETAIL_HTML"
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>File Comparison Full Row Mismatches: $JOB</title>
   <style>
-    body { font-family: Arial, sans-serif; background: #f6f8fa; color: #222; }
-    h2 { background: #2257bf; color: #fff; padding: 12px; border-radius: 8px; margin-bottom: 18px;}
-    .tables-scroll { display: flex; flex-wrap: wrap; gap: 34px; overflow-x: auto; }
-    .full-table-block { margin: 14px 0 30px 0; }
-    .block-title { text-align: center; font-weight: bold; font-size: 18px; background: #f0f5fa; padding: 7px 0; border-radius: 8px 8px 0 0; }
-    .row-tables { display: flex; gap: 18px; }
-    .col-table { border-collapse: collapse; min-width: 660px; background: #fff; }
-    .col-table th, .col-table td { border: 1px solid #b0bfd8; padding: 7px 10px; text-align: left; font-size: 13px; white-space: pre;}
-    .col-table th { background: #f5f7fa; color: #29497e; font-weight: bold; position: sticky; top: 0; z-index: 2;}
-    .row-id { color: #fff; background: #607D8B; font-size: 12px; font-weight: normal;}
-    .mismatch-cell { background: #ff4757; color: #fff; font-weight: bold; }
-    .scroll-sync { max-height: 340px; overflow-y: auto; }
-    .file-label { font-size: 13px; color: #334; background: #f3f8fc; border-radius: 0 0 8px 8px; padding: 2px 0; text-align: center; }
-    .sample-label { margin-top: 0; font-size: 12px; color: #888;}
-    @media (max-width: 1200px) {
-      .col-table { font-size: 11px; }
-      .block-title { font-size: 15px; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; background: #f8fafc; margin: 0;}
+    .hdr { background: #322B4F; color: #fff; font-size: 2em; padding: 20px 30px; border-radius: 0 0 8px 8px; }
+    .section { margin: 2em 0 1em 2%; font-size: 1.1em; font-weight: 500; color: #322B4F;}
+    .scroll-table-container {
+      width: 98%;
+      margin: 25px auto 0 auto;
+      border-radius: 12px;
+      box-shadow: 0 6px 32px 0 #4f40801c;
+      background: #fff;
+      overflow-x: auto;
+      max-height: 340px;
+      overflow-y: auto;
+    }
+    table.tbl {
+      border-collapse: separate;
+      border-spacing: 0;
+      width: 100%;
+      min-width: 800px;
+    }
+    table.tbl th, table.tbl td {
+      padding: 12px 14px;
+      text-align: left;
+      white-space: nowrap;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    table.tbl th {
+      background: #322B4F;
+      color: #fff;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .rowname {
+      font-weight: bold;
+      background: #ede8ff !important;
+      color: #322B4F;
+      position: sticky;
+      left: 0;
+      z-index: 1;
+    }
+    .miss {
+      background: #ffe1e1 !important;
+      color: #b93d3d !important;
+      font-weight: bold;
+      border-radius: 4px;
+    }
+    .colhead {
+      background: #ede8ff;
+      color: #2c2346;
+      font-weight: 600;
+      text-align: left;
+    }
+    /* Hide default scrollbars for cleaner look, but still scrollable */
+    .scroll-table-container::-webkit-scrollbar {
+      height: 8px;
+      background: #ede8ff;
+      border-radius: 4px;
+    }
+    .scroll-table-container::-webkit-scrollbar-thumb {
+      background: #c0b6e1;
+      border-radius: 4px;
     }
   </style>
-  <script>
-    // Synchronized vertical scrolling
-    document.addEventListener("DOMContentLoaded", function() {
-      document.querySelectorAll('.row-tables').forEach(function(rowPair){
-        let tds = rowPair.querySelectorAll('.scroll-sync');
-        tds.forEach(function(t1){
-          t1.addEventListener('scroll', function() {
-            tds.forEach(function(t2){ if(t2!==t1) t2.scrollTop = t1.scrollTop; });
-          });
-        });
-      });
-    });
-  </script>
 </head>
 <body>
-  <h2>Side-by-Side Full Row Data Mismatches (up to $MAX_SAMPLES per column)</h2>
-EOF
+<div class="hdr">Column-wise Data Mismatches (Sampled)</div>
+EOT
 
-  # Read original headers to display as table headers
-  td_header_arr=()
-  bq_header_arr=()
-  IFS=$'\t' read -r -a td_header_arr <<< "$(echo "${td_cols[*]}" | tr ' ' $'\t')"
-  IFS=$'\t' read -r -a bq_header_arr <<< "$(echo "${bq_cols[*]}" | tr ' ' $'\t')"
-
-  for col in "${mismatched_columns[@]}"; do
-    # Find column index (1-based)
-    col_idx=1
-    for idx in "${!td_cols[@]}"; do
-      [[ "${td_cols[$idx]}" == "$col" ]] && col_idx=$((idx + 1)) && break
-    done
-    td_file="${LOG_DIR}/${JOB}_${col}_mismatch_td.txt"
-    bq_file="${LOG_DIR}/${JOB}_${col}_mismatch_bq.txt"
-
-    if [[ -s "$td_file" && -s "$bq_file" ]]; then
-      echo "<div class='full-table-block'>" >> "$MISMATCH_HTML"
-      echo "<div class='block-title'>Column: <span style='color:#2257bf;'>$col</span> &nbsp; (Sample $MAX_SAMPLES rows)</div>" >> "$MISMATCH_HTML"
-      echo "<div class='row-tables'>" >> "$MISMATCH_HTML"
-
-      # Gather up to MAX_SAMPLES row numbers from mismatch files
-      rownums=()
-      awk -F': ' 'NR<=ENVIRON["MAX_SAMPLES"]{print $1}' "$td_file" | while read -r rowid; do
-        rownums+=("$rowid")
-      done
-
-      # Use only up to MAX_SAMPLES
-      rownums=($(awk -F': ' -v max="$MAX_SAMPLES" 'NR<=max{print $1}' "$td_file"))
-
-      # Left: TD file
-      echo "<div><div class='file-label'>TD File</div>" >> "$MISMATCH_HTML"
-      echo "<div class='scroll-sync'><table class='col-table'><tr><th class='row-id'>Row</th>" >> "$MISMATCH_HTML"
-      for h in "${td_cols[@]}"; do echo "<th>$h</th>" >> "$MISMATCH_HTML"; done
-      echo "</tr>" >> "$MISMATCH_HTML"
-      for rnum in "${rownums[@]}"; do
-        # Use awk to print the whole row
-        row=$(awk -v r="$((rnum+1))" -F"$SPLIT_DELIM" 'NR==r{for(i=1;i<=NF;i++)printf "%s\t",$i;print ""}' "$TD_PATH")
-        IFS=$'\t' read -r -a arr <<< "$row"
-        echo "<tr><td class='row-id'>$rnum</td>" >> "$MISMATCH_HTML"
-        for i in "${!arr[@]}"; do
-          cell="${arr[$i]}"
-          # Highlight if this column is the mismatched column
-          if (( i+1 == col_idx )); then
-            echo "<td class='mismatch-cell'>$cell</td>" >> "$MISMATCH_HTML"
-          else
-            echo "<td>$cell</td>" >> "$MISMATCH_HTML"
-          fi
-        done
-        echo "</tr>" >> "$MISMATCH_HTML"
-      done
-      echo "</table></div></div>" >> "$MISMATCH_HTML"
-
-      # Right: BQ file
-      echo "<div><div class='file-label'>BQ File</div>" >> "$MISMATCH_HTML"
-      echo "<div class='scroll-sync'><table class='col-table'><tr><th class='row-id'>Row</th>" >> "$MISMATCH_HTML"
-      for h in "${bq_cols[@]}"; do echo "<th>$h</th>" >> "$MISMATCH_HTML"; done
-      echo "</tr>" >> "$MISMATCH_HTML"
-      for rnum in "${rownums[@]}"; do
-        row=$(awk -v r="$((rnum+1))" -F"$SPLIT_DELIM" 'NR==r{for(i=1;i<=NF;i++)printf "%s\t",$i;print ""}' "$BQ_PATH")
-        IFS=$'\t' read -r -a arr <<< "$row"
-        echo "<tr><td class='row-id'>$rnum</td>" >> "$MISMATCH_HTML"
-        for i in "${!arr[@]}"; do
-          cell="${arr[$i]}"
-          if (( i+1 == col_idx )); then
-            echo "<td class='mismatch-cell'>$cell</td>" >> "$MISMATCH_HTML"
-          else
-            echo "<td>$cell</td>" >> "$MISMATCH_HTML"
-          fi
-        done
-        echo "</tr>" >> "$MISMATCH_HTML"
-      done
-      echo "</table></div></div>" >> "$MISMATCH_HTML"
-
-      echo "</div></div>" >> "$MISMATCH_HTML"
-    fi
+for mism_col in "${mismatched_columns[@]}"; do
+  # Get column index (1-based)
+  col_idx=-1
+  for ((i=0; i<${#td_cols[@]}; i++)); do
+    [[ "${td_cols[$i]}" == "$mism_col" ]] && col_idx=$((i+1)) && break
   done
+  [[ $col_idx -eq -1 ]] && continue
 
-cat <<EOF >> "$MISMATCH_HTML"
-  <div style="margin:18px 0; font-size:13px; color:#888;">Scroll tables side-by-side to view full rows. Highlighted cell is the mismatched column.<br>Showing up to $MAX_SAMPLES rows per column.</div>
-</body>
-</html>
-EOF
+  td_mismatch_file="${LOG_DIR}/${JOB}_${mism_col}_mismatch_td.txt"
+  bq_mismatch_file="${LOG_DIR}/${JOB}_${mism_col}_mismatch_bq.txt"
+  [[ ! -s "$td_mismatch_file" ]] && continue
 
-echo "Full row mismatch HTML report generated: $MISMATCH_HTML"
-fi
+  # Extract row numbers (max 10), remove 'Row' prefix, trim colon
+  mapfile -t mismatch_lines < <(awk '{gsub("Row ",""); gsub(":",""); print $1}' "$td_mismatch_file" | head -$MAX_SAMPLE)
+
+  echo "<div class=\"section\"><b>Column:</b> <span style=\"color:#105ba6\">$mism_col</span></div>" >> "$COLUMN_DETAIL_HTML"
+
+  for line_no in "${mismatch_lines[@]}"; do
+    [[ -z "$line_no" ]] && continue
+
+    # Fetch the full row from TD_TEMP_DATA/BQ_TEMP_DATA (the full data, not just the column)
+    td_row=$(awk -F"$SPLIT_DELIM" -v r="$line_no" 'NR==r{print}' "$TD_TEMP_DATA")
+    bq_row=$(awk -F"$SPLIT_DELIM" -v r="$line_no" 'NR==r{print}' "$BQ_TEMP_DATA")
+
+    [[ -z "$td_row" && -z "$bq_row" ]] && continue
+
+    IFS="$SPLIT_DELIM" read -r -a td_arr <<< "$td_row"
+    IFS="$SPLIT_DELIM" read -r -a bq_arr <<< "$bq_row"
+
+    # Table structure
+    echo "<div class=\"scroll-table-container\">" >> "$COLUMN_DETAIL_HTML"
+    echo "<table class=\"tbl\">" >> "$COLUMN_DETAIL_HTML"
+
+    echo "<tr><td class=\"rowname\">Row $line_no</td>" >> "$COLUMN_DETAIL_HTML"
+    for h in "${td_cols[@]}"; do
+      echo "<td class=\"colhead center\">$h</td>" >> "$COLUMN_DETAIL_HTML"
+    done
+    echo "</tr>" >> "$COLUMN_DETAIL_HTML"
+
+    echo "<tr><td class=\"rowname\">TD</td>" >> "$COLUMN_DETAIL_HTML"
+    for ((j=0; j<${#td_cols[@]}; j++)); do
+      if [[ $((j+1)) == $col_idx ]]; then
+        echo "<td class=\"miss\">${td_arr[j]}</td>" >> "$COLUMN_DETAIL_HTML"
+      else
+        echo "<td>${td_arr[j]}</td>" >> "$COLUMN_DETAIL_HTML"
+      fi
+    done
+    echo "</tr>" >> "$COLUMN_DETAIL_HTML"
+
+    echo "<tr><td class=\"rowname\">BQ</td>" >> "$COLUMN_DETAIL_HTML"
+    for ((j=0; j<${#bq_cols[@]}; j++)); do
+      if [[ $((j+1)) == $col_idx ]]; then
+        echo "<td class=\"miss\">${bq_arr[j]}</td>" >> "$COLUMN_DETAIL_HTML"
+      else
+        echo "<td>${bq_arr[j]}</td>" >> "$COLUMN_DETAIL_HTML"
+      fi
+    done
+    echo "</tr>" >> "$COLUMN_DETAIL_HTML"
+
+    echo "</table></div><br>" >> "$COLUMN_DETAIL_HTML"
+  done
+done
+
+echo "</body></html>" >> "$COLUMN_DETAIL_HTML"
 
 exit 0
