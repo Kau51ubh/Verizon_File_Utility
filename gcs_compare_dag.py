@@ -11,39 +11,39 @@ default_args = {
 }
 
 def extract_and_log_summary(**context):
-    import re
+    import sys
+    from bs4 import BeautifulSoup
+
     ti = context["ti"]
     resp = ti.xcom_pull(task_ids="invoke_compare_function")
     html = resp.get("html_summary", "")
     log = ti.log
 
-    # ANSI color codes for log prettification
-    def colorize(text, color):
-        colors = {
-            "red": "\033[91m",
-            "green": "\033[92m",
-            "yellow": "\033[93m",
-            "cyan": "\033[96m",
-            "end": "\033[0m",
-        }
-        return f"{colors.get(color, '')}{text}{colors['end']}"
+    # ANSI escape codes for styling
+    BLUE_BG = "\033[44;97;1m"
+    ENDC = "\033[0m"
+    GREEN = "\033[32;1m"
+    RED = "\033[31;1m"
+    BOLD = "\033[1m"
+    HEADER = f"{BLUE_BG}  ★★  GCS FILE COMPARISON SUMMARY  ★★  {ENDC}"
 
-    log.info("")
-    log.info("="*70)
-    log.info(colorize("               ★★  GCS FILE COMPARISON SUMMARY  ★★", "cyan"))
-    log.info("="*70)
-    log.info("")
+    # Pretty summary bar
+    bar = f"{BOLD}{'=' * 70}{ENDC}"
+
+    log.info(bar)
+    log.info(HEADER)
+    log.info(bar)
 
     if not html:
-        log.info(colorize("No HTML summary returned. Raw XCom: %s", "red"), resp)
+        log.info("No HTML summary returned. Raw XCom: %s", resp)
         for field in [
             "Job Name", "File Name", "TD Row Count | Column Count | Missing Columns",
             "BQ Row Count | Column Count | Missing Columns", "Count Variance", "Header Validation",
             "Count Validation", "File Extension Validation", "Checksum Validation", "Status",
             "Passed Columns", "Mismatched Columns"
         ]:
-            log.info(f"{field:40}: N/A")
-        log.info("="*70)
+            log.info(f"{field:45}: N/A")
+        log.info(bar)
         return
 
     soup = BeautifulSoup(html, "html.parser")
@@ -55,63 +55,40 @@ def extract_and_log_summary(**context):
             val = cols[1].get_text(strip=True)
             summary[key] = val
 
-    # Beautify Passed Columns
-    passed_cols = summary.get("Passed Columns", "N/A").replace(",,", ",")
-    if passed_cols.endswith(","):
-        passed_cols = passed_cols[:-1]
-    # Break up long column lists for readability
-    def col_list(colstring):
-        cols = [c for c in colstring.split(",") if c.strip()]
-        if not cols:
-            return "N/A"
-        # Display as multi-line if more than 6 columns
-        if len(cols) > 6:
-            return "\n    " + ", ".join(cols)
-        return ", ".join(cols)
-
-    # Colorize pass/fail statuses
-    def color_status(val):
-        if isinstance(val, str) and val.strip().upper() == "PASS":
-            return colorize(val, "green")
-        if isinstance(val, str) and val.strip().upper() == "FAIL":
-            return colorize(val, "red")
+    # Colorize PASS/FAIL/N/A with icons
+    def status_color(val):
+        up = (val or "").strip().upper()
+        if up == "PASS":
+            return f"{GREEN}✅ PASS{ENDC}"
+        elif up == "FAIL":
+            return f"{RED}❌ FAIL{ENDC}"
+        elif up in {"N/A", ""}:
+            return f"\033[33;1m⚠️  N/A{ENDC}"
         return val
 
+    # Remove double commas and trailing commas in "Passed Columns"
+    passed_cols = summary.get("Passed Columns", "N/A").replace(",,", ",").rstrip(",")
+    mismatched_cols = summary.get("Mismatched Columns", "N/A")
+
     fields = [
-        ("Job Name", "Job Name"),
-        ("File Name", "File Name"),
-        ("TD Row Count | Column Count | Missing Columns", "TD Row Count | Column Count | Missing Columns"),
-        ("BQ Row Count | Column Count | Missing Columns", "BQ Row Count | Column Count | Missing Columns"),
-        ("Count Variance", "Count Variance"),
-        ("Header Validation", "Header Validation"),
-        ("Count Validation", "Count Validation"),
-        ("File Extension Validation", "File Extension Validation"),
-        ("Checksum Validation", "Checksum Validation"),
-        ("Status", "Status"),
-        ("Passed Columns", col_list(passed_cols)),
-        ("Mismatched Columns", col_list(summary.get("Mismatched Columns", "N/A"))),
+        ("Job Name", summary.get("Job Name", "N/A")),
+        ("File Name", summary.get("File Name", "N/A")),
+        ("TD Row Count | Column Count | Missing Columns", summary.get("TD Row Count | Column Count | Missing Columns", "N/A")),
+        ("BQ Row Count | Column Count | Missing Columns", summary.get("BQ Row Count | Column Count | Missing Columns", "N/A")),
+        ("Count Variance", summary.get("Count Variance", "N/A")),
+        ("Header Validation", status_color(summary.get("Header Validation", "N/A"))),
+        ("Count Validation", status_color(summary.get("Count Validation", "N/A"))),
+        ("File Extension Validation", status_color(summary.get("File Extension Validation", "N/A"))),
+        ("Checksum Validation", status_color(summary.get("Checksum Validation", "N/A"))),
+        ("Status", BOLD + status_color(summary.get("Status", "N/A")) + ENDC),
+        ("Passed Columns", passed_cols),
+        ("Mismatched Columns", mismatched_cols),
     ]
 
-    for label, key in fields:
-        val = key if label == "Passed Columns" else summary.get(key, "N/A")
-        if label == "Passed Columns":
-            val = col_list(passed_cols)
-        if label == "Mismatched Columns":
-            val = col_list(summary.get("Mismatched Columns", "N/A"))
-        # Colorize for status fields
-        if label.endswith("Validation") or label == "Status":
-            val = color_status(val)
-        # Multi-line for columns
-        if isinstance(val, str) and "\n" in val:
-            log.info(f"{label:40}:")
-            for line in val.splitlines():
-                if line.strip():
-                    log.info(f"    {line}")
-        else:
-            log.info(f"{label:40}: {val}")
+    for label, val in fields:
+        log.info(f"{BOLD}{label:45}:{ENDC} {val}")
 
-    log.info("")
-    log.info("="*70)
+    log.info(bar)
 
 with DAG(
     dag_id="compare_gcs_files_runtime_config",

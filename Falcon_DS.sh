@@ -38,17 +38,25 @@ ls -lh "$BQ_PATH"
 td_header=$(head -1 "$TD_PATH" | tr -d '\r\n')
 bq_header=$(head -1 "$BQ_PATH" | tr -d '\r\n')
 
-# --- Dynamic awk field splitter (for multi-char DELIM) ---
-AWK_DELIM=$(printf '%s' "$DELIM" | sed 's/[]\/$*.^[]/\\&/g')
-
-# handling for TAB 
+# --------- Universal delimiter handling ---------
+# Converts all multi-char delimiters to TAB for processing.
 if [[ "$DELIM" == "\\t" ]]; then
   DELIM=$'\t'
-  AWK_DELIM="$DELIM"
 fi
 
-IFS=$'\n' read -d '' -r -a td_cols < <(echo "$td_header" | awk -F"$AWK_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
-IFS=$'\n' read -d '' -r -a bq_cols < <(echo "$bq_header" | awk -F"$AWK_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
+if [[ "${#DELIM}" -gt 1 ]]; then
+  td_header_fixed="${td_header//${DELIM}/$'\t'}"
+  bq_header_fixed="${bq_header//${DELIM}/$'\t'}"
+  SPLIT_DELIM=$'\t'
+else
+  td_header_fixed="$td_header"
+  bq_header_fixed="$bq_header"
+  SPLIT_DELIM="$DELIM"
+fi
+
+# ----------- EXTRACT COLUMNS -----------
+IFS=$'\n' read -d '' -r -a td_cols < <(echo "$td_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
+IFS=$'\n' read -d '' -r -a bq_cols < <(echo "$bq_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
 
 td_col_count=${#td_cols[@]}
 bq_col_count=${#bq_cols[@]}
@@ -105,25 +113,34 @@ bq_ext="${BQ_FILE##*.}"
 FILE_EXT_VAL="PASS"
 [[ "$td_ext" != "$bq_ext" ]] && FILE_EXT_VAL="FAIL"
 
-# ----------- CHECKSUM VALIDATION -------
-# Only compare if col counts match
+# ----------- FAST FILE CHECKSUM VALIDATION -----------
+TD_FILE_CHK=$(cksum "$TD_PATH" | awk '{print $1}')
+BQ_FILE_CHK=$(cksum "$BQ_PATH" | awk '{print $1}')
+FAST_CHECKSUM_MATCHED=0
 CHECKSUM_VAL="N/A"
-if [[ $td_col_count -eq $bq_col_count && "$HEADER_VAL" == "PASS" && "$COUNT_VAL" == "PASS" ]]; then
-    TD_SUM=$(awk -F"$AWK_DELIM" 'NR>1{for(i=1;i<=NF;i++)s[i]+=$i} END{for(j in s)printf "%s,",s[j]}' "$TD_PATH")
-    BQ_SUM=$(awk -F"$AWK_DELIM" 'NR>1{for(i=1;i<=NF;i++)s[i]+=$i} END{for(j in s)printf "%s,",s[j]}' "$BQ_PATH")
+
+if [[ "$TD_FILE_CHK" == "$BQ_FILE_CHK" ]]; then
     CHECKSUM_VAL="PASS"
-    [[ "$TD_SUM" != "$BQ_SUM" ]] && CHECKSUM_VAL="FAIL"
+    FAST_CHECKSUM_MATCHED=1
 else
     CHECKSUM_VAL="FAIL"
 fi
 
 # ----------- COLUMN DATA COMPARISON (MISMATCH/PASS) -----------
-
 passed_columns=()
 mismatched_columns=()
-# Only compare if structure matches
-if [[ $td_col_count -eq $bq_col_count && $TD_ROWS -eq $BQ_ROWS && "$HEADER_VAL" == "PASS" ]]; then
-    # For each column, check data equality
+if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROWS -eq $BQ_ROWS && "$HEADER_VAL" == "PASS" ]]; then
+
+    # If multi-char delimiter, preprocess whole files to TAB
+    TD_TEMP_DATA="$TD_PATH"
+    BQ_TEMP_DATA="$BQ_PATH"
+    if [[ "${#DELIM}" -gt 1 ]]; then
+      TD_TEMP_DATA="${LOG_DIR}/TD_TEMP_DATA.txt"
+      BQ_TEMP_DATA="${LOG_DIR}/BQ_TEMP_DATA.txt"
+      tail -n +2 "$TD_PATH" | sed "s/${DELIM}/$'\t'/g" > "$TD_TEMP_DATA"
+      tail -n +2 "$BQ_PATH" | sed "s/${DELIM}/$'\t'/g" > "$BQ_TEMP_DATA"
+    fi
+
     for ((col=1; col<=td_col_count; col++)); do
         td_col="${td_cols[$((col-1))]}"
         bq_col="${bq_cols[$((col-1))]}"
@@ -136,13 +153,13 @@ if [[ $td_col_count -eq $bq_col_count && $TD_ROWS -eq $BQ_ROWS && "$HEADER_VAL" 
         td_out="${LOG_DIR}/${JOB}_${td_col}_mismatch_td.txt"
         bq_out="${LOG_DIR}/${JOB}_${td_col}_mismatch_bq.txt"
         : > "$td_out"; : > "$bq_out"
-        for ((row=2; row<=TD_ROWS+1; row++)); do
-            td_val=$(awk -F"$AWK_DELIM" -v r="$row" -v c="$col" 'NR==r{print $c}' "$TD_PATH")
-            bq_val=$(awk -F"$AWK_DELIM" -v r="$row" -v c="$col" 'NR==r{print $c}' "$BQ_PATH")
+        for ((row=1; row<=TD_ROWS; row++)); do
+            td_val=$(awk -F"$SPLIT_DELIM" -v r="$row" -v c="$col" 'NR==r{print $c}' "$TD_TEMP_DATA")
+            bq_val=$(awk -F"$SPLIT_DELIM" -v r="$row" -v c="$col" 'NR==r{print $c}' "$BQ_TEMP_DATA")
             if [[ "$td_val" != "$bq_val" ]]; then
                 diff_found=1
-                echo "Row $((row-1)): $td_val" >> "$td_out"
-                echo "Row $((row-1)): $bq_val" >> "$bq_out"
+                echo "Row $((row)): $td_val" >> "$td_out"
+                echo "Row $((row)): $bq_val" >> "$bq_out"
             fi
         done
         if [[ $diff_found -eq 0 ]]; then
@@ -152,6 +169,12 @@ if [[ $td_col_count -eq $bq_col_count && $TD_ROWS -eq $BQ_ROWS && "$HEADER_VAL" 
             mismatched_columns+=("$td_col")
         fi
     done
+else
+    # If fast checksum passed, consider all columns passed
+    if [[ $FAST_CHECKSUM_MATCHED -eq 1 ]]; then
+        passed_columns=("${td_cols[@]}")
+        mismatched_columns=()
+    fi
 fi
 
 PASSED_COLUMNS=$(IFS=,; echo "${passed_columns[*]}")
