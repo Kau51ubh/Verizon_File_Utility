@@ -2,147 +2,195 @@
 
 set -e
 
-JOB_NAME="$1"
+# ----------- CONFIG & ARGS -----------
+JOB="$1"
 TD_FILE="$2"
 BQ_FILE="$3"
 DELIM="$4"
 WIDTHS="$5"
 TS="$6"
 
-# These should point to the correct GCSFuse mount locations!
 TD_PATH="/mnt/bucket_td/$TD_FILE"
 BQ_PATH="/mnt/bucket_bq/$BQ_FILE"
-
-# Output log and summary directory (change as needed)
-LOG_DIR="/mnt/bucket_bq/logs/${JOB_NAME}_${TS}"
+LOG_DIR="/mnt/bucket_bq/logs/${JOB}_${TS}"
 mkdir -p "$LOG_DIR"
-HTML_FILE="$LOG_DIR/${JOB_NAME}_summary.html"
+SUMMARY_HTML="${LOG_DIR}/${JOB}_summary.html"
 
-# --- LOG ENV ---
+FILENAME=$(basename "$TD_FILE")
 echo "========== Script start =========="
 echo "PWD: $PWD"
 echo "USER: $(whoami)"
 echo "ARGS: $@"
 echo "ENVIRONMENT:"
-env
-
-echo "Job Name   : $JOB_NAME"
+env | grep -E 'PYTHONUNBUFFERED|LANGUAGE|K_REVISION|SERVER_SOFTWARE|CLOUD_RUN_TIMEOUT_SECONDS|PWD|FUNCTION_SIGNATURE_TYPE|PORT|CNB_STACK_ID|CNB_GROUP_ID|HOME|LANG|K_SERVICE|GAE_RUNTIME|SHLVL|CNB_USER_ID|PYTHONDONTWRITEBYTECODE|LD_LIBRARY_PATH|LC_ALL|PATH|PYTHONUSERBASE|FUNCTION_TARGET|K_CONFIGURATION|_'
+echo "Job Name   : $JOB"
 echo "TD File    : $TD_FILE"
 echo "BQ File    : $BQ_FILE"
 echo "Delimiter  : $DELIM"
 echo "Widths     : $WIDTHS"
 echo "Timestamp  : $TS"
 
-# --- Existence Check ---
-if [[ ! -f "$TD_PATH" ]]; then
-    echo "[ERROR] TD file not found: $TD_PATH"
-    exit 1
-fi
-if [[ ! -f "$BQ_PATH" ]]; then
-    echo "[ERROR] BQ file not found: $BQ_PATH"
-    exit 1
-fi
+# ----------- FILE EXISTENCE -----------
+ls -lh "$TD_PATH"
+ls -lh "$BQ_PATH"
 
-echo "TD file exists? $(ls -lh "$TD_PATH")"
-echo "BQ file exists? $(ls -lh "$BQ_PATH")"
-
-# --- Preview first lines for debug ---
-echo "First 2 lines of TD file:"
-head -2 "$TD_PATH"
-echo "First 2 lines of BQ file:"
-head -2 "$BQ_PATH"
-
-# --- Header Extraction ---
+# ----------- READ HEADERS -------------
 td_header=$(head -1 "$TD_PATH" | tr -d '\r\n')
 bq_header=$(head -1 "$BQ_PATH" | tr -d '\r\n')
 
-# --- Column Counts & Headers ---
-readarray -t td_cols < <(awk -F'!\\|' '{for(i=1;i<=NF;i++) print $i}' <<< "$td_header")
-readarray -t bq_cols < <(awk -F'!\\|' '{for(i=1;i<=NF;i++) print $i}' <<< "$bq_header")
+# --- Dynamic awk field splitter (for multi-char DELIM) ---
+AWK_DELIM=$(printf '%s' "$DELIM" | sed 's/[]\/$*.^[]/\\&/g')
 
+IFS=$'\n' read -d '' -r -a td_cols < <(echo "$td_header" | awk -F"$AWK_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
+IFS=$'\n' read -d '' -r -a bq_cols < <(echo "$bq_header" | awk -F"$AWK_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
 td_col_count=${#td_cols[@]}
 bq_col_count=${#bq_cols[@]}
 
-# --- Row Counts (minus header) ---
-td_row_count=$(($(wc -l < "$TD_PATH") - 1))
-bq_row_count=$(($(wc -l < "$BQ_PATH") - 1))
+echo "TD header: $td_header"
+echo "BQ header: $bq_header"
+echo "TD col count: $td_col_count"
+echo "BQ col count: $bq_col_count"
 
-# --- Column Comparison ---
-missing_in_bq=()
-passed_columns=()
-for col in "${td_cols[@]}"; do
-    if [[ " ${bq_cols[*]} " == *" $col "* ]]; then
-        passed_columns+=("$col")
-    else
-        missing_in_bq+=("$col")
-    fi
+# ----------- ROW COUNTS ---------------
+TD_ROWS=$(awk 'END{print NR-1}' "$TD_PATH")
+BQ_ROWS=$(awk 'END{print NR-1}' "$BQ_PATH")
+
+# ----------- FIND MISSING COLUMNS ------
+td_missing=""
+bq_missing=""
+
+for i in "${td_cols[@]}"; do
+    found=0
+    for j in "${bq_cols[@]}"; do
+        [[ "$i" == "$j" ]] && found=1 && break
+    done
+    [[ $found -eq 0 ]] && td_missing="$td_missing $i"
 done
 
-missing_in_td=()
-for col in "${bq_cols[@]}"; do
-    if [[ " ${td_cols[*]} " != *" $col "* ]]; then
-        missing_in_td+=("$col")
-    fi
+for j in "${bq_cols[@]}"; do
+    found=0
+    for i in "${td_cols[@]}"; do
+        [[ "$j" == "$i" ]] && found=1 && break
+    done
+    [[ $found -eq 0 ]] && bq_missing="$bq_missing $j"
 done
 
-# --- Mismatched Columns ---
-mismatched_columns="N/A"
-if [[ ${#missing_in_bq[@]} -gt 0 || ${#missing_in_td[@]} -gt 0 ]]; then
-    mismatched_columns=""
-    [[ ${#missing_in_bq[@]} -gt 0 ]] && mismatched_columns+="Missing in BQ: ${missing_in_bq[*]} "
-    [[ ${#missing_in_td[@]} -gt 0 ]] && mismatched_columns+="Missing in TD: ${missing_in_td[*]}"
+[[ -z "$td_missing" ]] && td_missing="None"
+[[ -z "$bq_missing" ]] && bq_missing="None"
+
+# ----------- COUNT VARIANCE ------------
+if [[ $TD_ROWS -eq 0 || $BQ_ROWS -eq 0 ]]; then
+    COUNT_VAR="N/A"
+else
+    COUNT_VAR=$(awk -v td="$TD_ROWS" -v bq="$BQ_ROWS" 'BEGIN{printf "%.2f%%", ((td-bq)/td)*100}')
 fi
 
-# --- Passed Columns as CSV, remove double commas ---
-passed_columns_csv=$(printf "%s," "${passed_columns[@]}")
-passed_columns_csv="${passed_columns_csv%,}"
+# ----------- HEADER/COL VALIDATION -----
+HEADER_VAL="PASS"
+[[ "$td_header" != "$bq_header" ]] && HEADER_VAL="FAIL"
 
-# --- Validations ---
-header_status="FAIL"
-[[ "$td_header" == "$bq_header" ]] && header_status="PASS"
+COUNT_VAL="PASS"
+[[ $TD_ROWS -ne $BQ_ROWS ]] && COUNT_VAL="FAIL"
 
-count_status="FAIL"
-[[ "$td_row_count" == "$bq_row_count" ]] && count_status="PASS"
-
-td_ext="${TD_FILE##*.}"
+# ----------- EXTENSION VALIDATION ------
+td_ext="${FILENAME##*.}"
 bq_ext="${BQ_FILE##*.}"
-ext_status="FAIL"
-[[ "$td_ext" == "$bq_ext" ]] && ext_status="PASS"
+FILE_EXT_VAL="PASS"
+[[ "$td_ext" != "$bq_ext" ]] && FILE_EXT_VAL="FAIL"
 
-td_checksum=$(md5sum "$TD_PATH" | awk '{print $1}')
-bq_checksum=$(md5sum "$BQ_PATH" | awk '{print $1}')
-checksum_status="FAIL"
-[[ "$td_checksum" == "$bq_checksum" ]] && checksum_status="PASS"
-
-overall_status="FAIL"
-if [[ "$header_status" == "PASS" && "$count_status" == "PASS" && "$ext_status" == "PASS" && "$checksum_status" == "PASS" ]]; then
-  overall_status="PASS"
+# ----------- CHECKSUM VALIDATION -------
+# Only compare if col counts match
+CHECKSUM_VAL="N/A"
+if [[ $td_col_count -eq $bq_col_count && "$HEADER_VAL" == "PASS" && "$COUNT_VAL" == "PASS" ]]; then
+    TD_SUM=$(awk -F"$AWK_DELIM" 'NR>1{for(i=1;i<=NF;i++)s[i]+=$i} END{for(j in s)printf "%s,",s[j]}' "$TD_PATH")
+    BQ_SUM=$(awk -F"$AWK_DELIM" 'NR>1{for(i=1;i<=NF;i++)s[i]+=$i} END{for(j in s)printf "%s,",s[j]}' "$BQ_PATH")
+    CHECKSUM_VAL="PASS"
+    [[ "$TD_SUM" != "$BQ_SUM" ]] && CHECKSUM_VAL="FAIL"
+else
+    CHECKSUM_VAL="FAIL"
 fi
 
-count_variance="N/A"
-if [[ "$td_row_count" -ne 0 ]]; then
-    count_variance=$(awk -v t="$td_row_count" -v b="$bq_row_count" 'BEGIN{printf "%.2f%%", t==0?0:(t-b)/t*100}')
+# ----------- COLUMN DATA COMPARISON (MISMATCH/PASS) -----------
+
+passed_columns=()
+mismatched_columns=()
+# Only compare if structure matches
+if [[ $td_col_count -eq $bq_col_count && $TD_ROWS -eq $BQ_ROWS && "$HEADER_VAL" == "PASS" ]]; then
+    # For each column, check data equality
+    for ((col=1; col<=td_col_count; col++)); do
+        td_col="${td_cols[$((col-1))]}"
+        bq_col="${bq_cols[$((col-1))]}"
+        # Compare this column (skip if header mismatch)
+        if [[ "$td_col" != "$bq_col" ]]; then
+            mismatched_columns+=("$td_col")
+            continue
+        fi
+        diff_found=0
+        td_out="${LOG_DIR}/${JOB}_${td_col}_mismatch_td.txt"
+        bq_out="${LOG_DIR}/${JOB}_${td_col}_mismatch_bq.txt"
+        : > "$td_out"; : > "$bq_out"
+        for ((row=2; row<=TD_ROWS+1; row++)); do
+            td_val=$(awk -F"$AWK_DELIM" -v r="$row" -v c="$col" 'NR==r{print $c}' "$TD_PATH")
+            bq_val=$(awk -F"$AWK_DELIM" -v r="$row" -v c="$col" 'NR==r{print $c}' "$BQ_PATH")
+            if [[ "$td_val" != "$bq_val" ]]; then
+                diff_found=1
+                echo "Row $((row-1)): $td_val" >> "$td_out"
+                echo "Row $((row-1)): $bq_val" >> "$bq_out"
+            fi
+        done
+        if [[ $diff_found -eq 0 ]]; then
+            passed_columns+=("$td_col")
+            rm -f "$td_out" "$bq_out"
+        else
+            mismatched_columns+=("$td_col")
+        fi
+    done
 fi
 
-# --- OUTPUT HTML SUMMARY ---
-cat <<EOF > "$HTML_FILE"
+PASSED_COLUMNS=$(IFS=,; echo "${passed_columns[*]}")
+MISMATCHED_COLUMNS=$(IFS=,; echo "${mismatched_columns[*]}")
+PASSED_COLUMNS=${PASSED_COLUMNS:-N/A}
+MISMATCHED_COLUMNS=${MISMATCHED_COLUMNS:-N/A}
+
+# ----------- STATUS AGGREGATE ----------
+STATUS="PASS"
+for s in "$HEADER_VAL" "$COUNT_VAL" "$FILE_EXT_VAL" "$CHECKSUM_VAL"; do
+    [[ "$s" == "FAIL" ]] && STATUS="FAIL" && break
+done
+
+# ----------- HTML SUMMARY --------------
+cat <<EOF > "$SUMMARY_HTML"
 <html><body>
 <table border="1" cellpadding="6" cellspacing="0">
-<tr><th>Job Name</th><td>${JOB_NAME}</td></tr>
-<tr><th>File Name</th><td>$(basename "$TD_FILE")</td></tr>
-<tr><th>TD Row Count | Column Count | Missing Columns</th><td>${td_row_count} | ${td_col_count} | ${missing_in_bq[*]:-None}</td></tr>
-<tr><th>BQ Row Count | Column Count | Missing Columns</th><td>${bq_row_count} | ${bq_col_count} | ${missing_in_td[*]:-None}</td></tr>
-<tr><th>Count Variance</th><td>${count_variance}</td></tr>
-<tr><th>Header Validation</th><td>${header_status}</td></tr>
-<tr><th>Count Validation</th><td>${count_status}</td></tr>
-<tr><th>File Extension Validation</th><td>${ext_status}</td></tr>
-<tr><th>Checksum Validation</th><td>${checksum_status}</td></tr>
-<tr><th>Status</th><td>${overall_status}</td></tr>
-<tr><th>Passed Columns</th><td>${passed_columns_csv}</td></tr>
-<tr><th>Mismatched Columns</th><td>${mismatched_columns}</td></tr>
+<tr><th>Job Name</th><td>$JOB</td></tr>
+<tr><th>File Name</th><td>$FILENAME</td></tr>
+<tr><th>TD Row Count | Column Count | Missing Columns</th><td>$TD_ROWS | $td_col_count | $td_missing</td></tr>
+<tr><th>BQ Row Count | Column Count | Missing Columns</th><td>$BQ_ROWS | $bq_col_count | $bq_missing</td></tr>
+<tr><th>Count Variance</th><td>$COUNT_VAR</td></tr>
+<tr><th>Header Validation</th><td>$HEADER_VAL</td></tr>
+<tr><th>Count Validation</th><td>$COUNT_VAL</td></tr>
+<tr><th>File Extension Validation</th><td>$FILE_EXT_VAL</td></tr>
+<tr><th>Checksum Validation</th><td>$CHECKSUM_VAL</td></tr>
+<tr><th>Status</th><td>$STATUS</td></tr>
+<tr><th>Passed Columns</th><td>$PASSED_COLUMNS</td></tr>
+<tr><th>Mismatched Columns</th><td>$MISMATCHED_COLUMNS</td></tr>
 </table>
 </body></html>
 EOF
 
-echo "HTML Summary generated: $HTML_FILE"
+echo "HTML Summary generated: $SUMMARY_HTML"
 echo "========== Script complete =========="
+echo "Job Name                                     : $JOB"
+echo "File Name                                    : $FILENAME"
+echo "TD Row Count | Column Count | Missing Columns: $TD_ROWS | $td_col_count | $td_missing"
+echo "BQ Row Count | Column Count | Missing Columns: $BQ_ROWS | $bq_col_count | $bq_missing"
+echo "Count Variance                               : $COUNT_VAR"
+echo "Header Validation                            : $HEADER_VAL"
+echo "Count Validation                             : $COUNT_VAL"
+echo "File Extension Validation                    : $FILE_EXT_VAL"
+echo "Checksum Validation                          : $CHECKSUM_VAL"
+echo "Status                                       : $STATUS"
+echo "Passed Columns                               : $PASSED_COLUMNS"
+echo "Mismatched Columns                           : $MISMATCHED_COLUMNS"
+
+exit 0
