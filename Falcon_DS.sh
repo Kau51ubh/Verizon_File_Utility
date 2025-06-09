@@ -14,7 +14,10 @@ TD_PATH="/mnt/bucket_td/$TD_FILE"
 BQ_PATH="/mnt/bucket_bq/$BQ_FILE"
 LOG_DIR="/mnt/bucket_bq/logs/${JOB}_${TS}"
 mkdir -p "$LOG_DIR"
-SUMMARY_HTML="${LOG_DIR}/${JOB}_summary.html"
+mkdir -p "$LOG_DIR"/HTML
+SUMMARY_HTML="${LOG_DIR}/HTML/${JOB}_summary.html"
+COLUMN_DETAIL_HTML="${LOG_DIR}/HTML/${JOB}_column_mismatch_detail.html"
+MAX_SAMPLE=10
 
 FILENAME=$(basename "$TD_FILE")
 echo "========== Script start =========="
@@ -238,8 +241,6 @@ echo "Status                                       : $STATUS"
 echo "Passed Columns                               : $PASSED_COLUMNS"
 echo "Mismatched Columns                           : $MISMATCHED_COLUMNS"
 
-COLUMN_DETAIL_HTML="${LOG_DIR}/${JOB}_column_mismatch_detail.html"
-MAX_SAMPLE=10
 
 cat <<EOT > "$COLUMN_DETAIL_HTML"
 <html>
