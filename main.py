@@ -3,6 +3,7 @@ import subprocess
 import datetime
 import json
 import functions_framework
+import traceback
 
 @functions_framework.http
 def compare_files(request):
@@ -60,6 +61,7 @@ def compare_files(request):
 
     except Exception as e:
         print("DEBUG: Exception:", str(e))
+        traceback.print_exc()  # <-- This prints the whole Python traceback!
         return (json.dumps({
             "status": "failed",
             "message": str(e)
