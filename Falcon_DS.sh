@@ -255,70 +255,121 @@ echo "HTML Summary generated: $SUMMARY_HTML"
 cat <<EOT > "$COLUMN_DETAIL_HTML"
 <html>
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <style>
-    body { font-family: 'Segoe UI', Arial, sans-serif; background: #f8fafc; margin: 0;}
-    .hdr { background: #322B4F; color: #fff; font-size: 2em; padding: 20px 30px; border-radius: 0 0 8px 8px; }
-    .section { margin: 2em 0 1em 2%; font-size: 1.1em; font-weight: 500; color: #322B4F;}
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #f9f9fc;
+      margin: 0;
+      color: #322b4f;
+      line-height: 1.5;
+    }
+    .hdr {
+      background: #322b4f;
+      color: #fff;
+      font-size: 2.4em;
+      font-weight: 700;
+      padding: 22px 40px;
+      border-radius: 0 0 12px 12px;
+      box-shadow: 0 3px 14px rgba(50, 43, 79, 0.3);
+      user-select: none;
+    }
+    .section {
+      margin: 2.5em 4% 1.5em 4%;
+      font-size: 1.3em;
+      font-weight: 700;
+      color: #322b4f;
+      border-left: 5px solid #322b4f;
+      padding-left: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      user-select: none;
+    }
     .scroll-table-container {
-      width: 98%;
-      margin: 25px auto 0 auto;
-      border-radius: 12px;
-      box-shadow: 0 6px 32px 0 #4f40801c;
+      width: 92%;
+      margin: 0 auto 2em auto;
+      border-radius: 14px;
+      box-shadow: 0 8px 30px rgba(79, 64, 128, 0.12);
       background: #fff;
       overflow-x: auto;
-      max-height: 340px;
+      max-height: 360px;
       overflow-y: auto;
+      border: 1px solid #dddcec;
     }
     table.tbl {
       border-collapse: separate;
       border-spacing: 0;
       width: 100%;
-      min-width: 800px;
+      min-width: 900px;
+      font-size: 0.95em;
+      color: #322b4f;
     }
     table.tbl th, table.tbl td {
-      padding: 12px 14px;
+      padding: 14px 20px;
       text-align: left;
       white-space: nowrap;
-      border-bottom: 1px solid #e0e0e0;
+      border-bottom: 1px solid #edeaf1;
+      vertical-align: middle;
     }
     table.tbl th {
-      background: #322B4F;
+      background: #322b4f;
       color: #fff;
-      font-weight: 600;
+      font-weight: 700;
       position: sticky;
       top: 0;
-      z-index: 2;
+      z-index: 3;
+      letter-spacing: 0.04em;
     }
     .rowname {
-      font-weight: bold;
-      background: #ede8ff !important;
-      color: #322B4F;
+      font-weight: 700;
+      background: #edeaf1 !important;
+      color: #322b4f;
       position: sticky;
       left: 0;
-      z-index: 1;
+      z-index: 2;
+      border-right: 1px solid #dddcec;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      user-select: none;
+      min-width: 38px;
+      text-align: center;
     }
     .miss {
       background: #ffe1e1 !important;
       color: #b93d3d !important;
-      font-weight: bold;
-      border-radius: 4px;
+      font-weight: 700;
+      border-radius: 6px;
+      box-shadow: 0 0 10px #f5b7b1 inset;
     }
     .colhead {
-      background: #ede8ff;
-      color: #2c2346;
-      font-weight: 600;
+      background: #edeaf1;
+      color: #322b4f;
+      font-weight: 700;
       text-align: left;
+      letter-spacing: 0.03em;
     }
-    /* Hide default scrollbars for cleaner look, but still scrollable */
+    /* Scrollbar styling */
     .scroll-table-container::-webkit-scrollbar {
-      height: 8px;
-      background: #ede8ff;
-      border-radius: 4px;
+      height: 10px;
+      background: #edeaf1;
+      border-radius: 6px;
     }
     .scroll-table-container::-webkit-scrollbar-thumb {
       background: #c0b6e1;
+      border-radius: 6px;
+    }
+    /* Zebra striping for readability */
+    table.tbl tr:nth-child(even) td {
+      background: #f9f7ff;
+    }
+    /* TD/BQ label cells */
+    .td-label, .bq-label {
+      background: #fff;
+      color: #322b4f;
+      font-weight: 700;
+      text-align: center;
       border-radius: 4px;
+      min-width: 40px;
     }
   </style>
 </head>
@@ -343,7 +394,6 @@ for col in "${mismatched_columns[@]}"; do
   printf '<div class="section"><strong>Column:</strong> %s</div>\n' "$col" >> "$COLUMN_DETAIL_HTML"
 
   for ln in "${lines[@]}"; do
-    # Adjust line number by subtracting 1 to get correct line in header-stripped temp files
     adjusted_ln=$((ln - 1))
 
     td_row=$(awk -F"$SPLIT_DELIM" -v r="$adjusted_ln" 'NR==r{print}' "$TD_TEMP")
@@ -360,7 +410,7 @@ for col in "${mismatched_columns[@]}"; do
       <tr><th class="rowname">Row $ln</th>
 $(for h in "${td_cols[@]}"; do printf '        <th class="colhead">%s</th>\n' "$h"; done)
       </tr>
-      <tr><td class="rowname">TD</td>
+      <tr><td class="td-label">TD</td>
 $(for j in "${!td_arr[@]}"; do
      if (( j+1 == idx )); then
        printf '        <td class="miss">%s</td>\n' "${td_arr[j]}"
@@ -369,7 +419,7 @@ $(for j in "${!td_arr[@]}"; do
      fi
    done)
       </tr>
-      <tr><td class="rowname">BQ</td>
+      <tr><td class="bq-label">BQ</td>
 $(for j in "${!bq_arr[@]}"; do
      if (( j+1 == idx )); then
        printf '        <td class="miss">%s</td>\n' "${bq_arr[j]}"
