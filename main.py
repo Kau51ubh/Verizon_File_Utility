@@ -28,9 +28,23 @@ def compare_files(request):
         print(f"DEBUG: TD file exists? {os.path.exists(td_full)} {td_full}")
         print(f"DEBUG: BQ file exists? {os.path.exists(bq_full)} {bq_full}")
         if os.path.exists(td_full):
-            with open(td_full) as f: print("DEBUG: First lines of TD:", [next(f) for _ in range(3)])
+            with open(td_full) as f:
+                lines = []
+                try:
+                    for _ in range(3):
+                        lines.append(next(f).rstrip('\n'))
+                except StopIteration:
+                    pass
+                print("DEBUG: First lines of TD:", lines)
         if os.path.exists(bq_full):
-            with open(bq_full) as f: print("DEBUG: First lines of BQ:", [next(f) for _ in range(3)])
+            with open(bq_full) as f:
+                lines = []
+                try:
+                    for _ in range(3):
+                        lines.append(next(f).rstrip('\n'))
+                except StopIteration:
+                    pass
+                print("DEBUG: First lines of BQ:", lines)
 
         script = "/workspace/Falcon_DS.sh"
         cmd = [
