@@ -155,7 +155,7 @@ if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROW
 
   # Buffered mismatch detection in awk for speed
   paste -d"$SPLIT_DELIM" "$TD_TEMP" "$BQ_TEMP" | awk -F"$SPLIT_DELIM" \
-    -v cols="$td_col_count" -v logdir="$LOG_DIR" -v job="$JOB" -v cnames="$colnames_csv" -v maxs="$MAX_SAMPLE" '
+    -v cols="$td_col_count" -v logdir="$LOG_DIR" -v job="$JOB" -v cnames="$colnames_csv" '
   BEGIN {
     split(cnames, colname, ",")
     for (i=1; i<=cols; i++) {
@@ -169,12 +169,10 @@ if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROW
     for (i=1; i<=cols; i++) {
       if ($i != $(i+cols)) {
         mismatch[i] = 1
-        if (sample_count[i] < maxs) {
           row_num = FNR + 1 # account for header line
           td_samples[i,sample_count[i]] = "Row " row_num ": " $i
           bq_samples[i,sample_count[i]] = "Row " row_num ": " $(i+cols)
           sample_count[i]++
-        }
       }
     }
   }
@@ -220,6 +218,14 @@ fi
 PASSED_COLUMNS=$(IFS=, ; echo "${passed_columns[*]:-N/A}")
 MISMATCHED_COLUMNS=$(IFS=, ; echo "${mismatched_columns[*]:-N/A}")
 
+mismatched_columns_with_counts=()
+for col in "${mismatched_columns[@]}"; do
+  td_mis_c=$(wc -l < "${LOG_DIR}/${JOB}_${col}_mismatch_td.txt")
+  mismatched_columns_with_counts+=("${col}(${td_mis_c})")
+done
+
+MISMATCHED_COLUMNS_WITH_COUNTS=$(IFS=, ; echo "${mismatched_columns_with_counts[*]}")
+
 # ----------- STATUS AGGREGATE ----------
 STATUS="PASS"
 for s in "$HEADER_VAL" "$COUNT_VAL" "$FILE_EXT_VAL" "$CHECKSUM_VAL"; do
@@ -235,8 +241,8 @@ cat <<EOF > "$SUMMARY_HTML"
 <table border="1" cellpadding="6" cellspacing="0">
 <tr><th>Job Name</th><td>$JOB</td></tr>
 <tr><th>File Name</th><td>$FILENAME</td></tr>
-<tr><th>TD Row Count | Column Count | Missing Columns</th><td>$TD_ROWS | $td_col_count | $td_missing</td></tr>
-<tr><th>BQ Row Count | Column Count | Missing Columns</th><td>$BQ_ROWS | $bq_col_count | $bq_missing</td></tr>
+<tr><th>TD Row Count | Column Count | Missing Columns</th><td>$TD_ROWS | $td_col_count | $bq_missing</td></tr>
+<tr><th>BQ Row Count | Column Count | Missing Columns</th><td>$BQ_ROWS | $bq_col_count | $td_missing</td></tr>
 <tr><th>Count Variance</th><td>$COUNT_VAR</td></tr>
 <tr><th>Header Validation</th><td>$HEADER_VAL</td></tr>
 <tr><th>Count Validation</th><td>$COUNT_VAL</td></tr>
@@ -244,7 +250,7 @@ cat <<EOF > "$SUMMARY_HTML"
 <tr><th>Checksum Validation</th><td>$CHECKSUM_VAL</td></tr>
 <tr><th>Status</th><td>$STATUS</td></tr>
 <tr><th>Passed Columns</th><td>$PASSED_COLUMNS</td></tr>
-<tr><th>Mismatched Columns</th><td>$MISMATCHED_COLUMNS</td></tr>
+<tr><th>Mismatched Columns</th><td>$MISMATCHED_COLUMNS_WITH_COUNTS</td></tr>
 </table>
 </body></html>
 EOF
@@ -323,7 +329,7 @@ cat <<EOT > "$COLUMN_DETAIL_HTML"
     .rowname {
       font-weight: 700;
       background: #edeaf1 !important;
-      color: #322b4f;
+      color: #000000 !important;
       position: sticky;
       left: 0;
       z-index: 2;
@@ -374,7 +380,7 @@ cat <<EOT > "$COLUMN_DETAIL_HTML"
   </style>
 </head>
 <body>
-<div class="hdr">Sample Data Mismatch</div>
+<div class="hdr">Sample Data Mismatch - $JOB - $FILENAME - ${TS} </div>
 EOT
 
 # Write detailed mismatch info into HTML
@@ -387,11 +393,14 @@ for col in "${mismatched_columns[@]}"; do
   td_file="${LOG_DIR}/${JOB}_${col}_mismatch_td.txt"
   bq_file="${LOG_DIR}/${JOB}_${col}_mismatch_bq.txt"
   [[ ! -s "$td_file" ]] && continue
-
+  
+  td_mis_cnt=$(wc -l < "$td_file")
+  bq_mis_cnt=$(wc -l < "$bq_file")
+  
   # Extract row numbers from mismatch file - these are original file line numbers (including header)
   readarray -t lines < <(awk '{ gsub(/^Row[[:space:]]/,""); sub(/:.*$/,""); print }' "$td_file" | head -n $MAX_SAMPLE)
-
-  printf '<div class="section"><strong>Column:</strong> %s</div>\n' "$col" >> "$COLUMN_DETAIL_HTML"
+  
+  printf '<div class="section"><strong>Column:</strong> %s - Mismatched Records (%d)</div>\n' "$col" "$td_mis_cnt" >> "$COLUMN_DETAIL_HTML"
 
   for ln in "${lines[@]}"; do
     adjusted_ln=$((ln - 1))
