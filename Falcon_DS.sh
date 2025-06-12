@@ -135,7 +135,7 @@ fi
 passed_columns=()
 mismatched_columns=()
 
-if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROWS -eq $BQ_ROWS && "$HEADER_VAL" == "PASS" ]]; then
+if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROWS -eq $BQ_ROWS ]]; then
 
   # Prepare temp files without headers
   TD_TEMP="${LOG_DIR}/TD_TEMP_DATA.txt"
