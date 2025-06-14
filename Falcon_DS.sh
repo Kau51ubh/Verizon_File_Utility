@@ -540,5 +540,5 @@ cat >> "$COLUMN_DETAIL_HTML" <<EOF
 </html>
 EOF
 
-echo "Column detail HTML generated: $COLUMN_DETAIL_HTML"
-echo "========== Script complete =========="
+log "Column detail HTML generated: $COLUMN_DETAIL_HTML"
+log "========== Script complete =========="
