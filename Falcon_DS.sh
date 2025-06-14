@@ -2,6 +2,8 @@
 
 set -euo pipefail  # strict mode for safer scripting
 
+START_TS=$(date +%s)
+
 # ----------- CONFIG & ARGS -----------
 JOB="${1:-N/A}"
 TD_FILE="${2:-N/A}"
@@ -64,6 +66,7 @@ BQ_TAIL=0
 TD_TRIM="$LOG_DIR/TD_TRIM.txt"
 BQ_TRIM="$LOG_DIR/BQ_TRIM.txt"
 
+# First: create trimmed versions
 if [[ $TD_TAIL -eq 1 ]]; then
   head -n $((TD_LINES - TD_TAIL)) "$TD_PATH" | tail -n +$TD_SKIP > "$TD_TRIM"
 else
@@ -74,6 +77,41 @@ if [[ $BQ_TAIL -eq 1 ]]; then
   head -n $((BQ_LINES - BQ_TAIL)) "$BQ_PATH" | tail -n +$BQ_SKIP > "$BQ_TRIM"
 else
   tail -n +$BQ_SKIP "$BQ_PATH" > "$BQ_TRIM"
+fi
+
+# Then: apply fixed-width parsing if WIDTHS is provided
+if [[ -n "$WIDTHS" ]]; then
+  log "Converting fixed-width files to tab-delimited using WIDTHS: $WIDTHS"
+
+  # Convert comma-separated widths to array
+  IFS=',' read -r -a FIELD_WIDTHS <<< "$WIDTHS"
+
+  convert_fixed_to_tab() {
+  local infile="$1"
+  local outfile="$2"
+
+  awk -v OFS='\t' -v widths_csv="$WIDTHS" '
+    BEGIN {
+      n = split(widths_csv, w, ",");
+      wstart[1] = 1;
+      for (i = 2; i <= n; i++) {
+        wstart[i] = wstart[i - 1] + w[i - 1];
+      }
+    }
+    {
+      for (i = 1; i <= n; i++) {
+        printf "%s%s", substr($0, wstart[i], w[i]), (i == n ? "\n" : OFS);
+      }
+    }
+  ' "$infile" > "$outfile"
+}
+
+  convert_fixed_to_tab "$TD_TRIM" "$TD_TRIM.tmp" && mv "$TD_TRIM.tmp" "$TD_TRIM"
+  convert_fixed_to_tab "$BQ_TRIM" "$BQ_TRIM.tmp" && mv "$BQ_TRIM.tmp" "$BQ_TRIM"
+  log "Fixed-width files successfully converted to tab-delimited."
+
+  DELIM=$'\t'
+  SPLIT_DELIM=$'\t'
 fi
 
 # Extract headers from files (adjusted for HAS_HEADER + HAS_COLNAMES)
@@ -104,8 +142,33 @@ bq_cols=()
 
 if [[ "$HAS_COLNAMES" == "Y" ]]; then
   # Extract headers from header line
-  IFS=$'\n' read -d '' -r -a td_cols < <(echo "$td_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
-  IFS=$'\n' read -d '' -r -a bq_cols < <(echo "$bq_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
+  IFS=$'\n' read -d '' -r -a td_cols < <(
+  echo "$td_header_fixed" |
+  awk -F"$SPLIT_DELIM" '{
+    for(i=1;i<=NF;i++) {
+      if ($i ~ /^[[:space:]]*$/) {
+        printf("COL%d\n", i)
+      } else {
+        print $i
+      }
+    }
+  }'
+  printf '\0'
+)
+
+IFS=$'\n' read -d '' -r -a bq_cols < <(
+  echo "$bq_header_fixed" |
+  awk -F"$SPLIT_DELIM" '{
+    for(i=1;i<=NF;i++) {
+      if ($i ~ /^[[:space:]]*$/) {
+        printf("COL%d\n", i)
+      } else {
+        print $i
+      }
+    }
+  }'
+  printf '\0'
+)
 else
   # Generate dummy columns from first data row
   td_col_count=$(head -1 "$TD_TRIM" | awk -F"$SPLIT_DELIM" '{print NF}')
@@ -244,48 +307,37 @@ if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROW
 
   colnames_csv=$(IFS=, ; echo "${td_cols[*]}")
 
-  # Buffered mismatch detection in awk for speed
-  paste -d"$SPLIT_DELIM" "$TD_TEMP" "$BQ_TEMP" | awk -F"$SPLIT_DELIM" \
-    -v cols="$td_col_count" -v logdir="$LOG_DIR" -v job="$JOB" -v cnames="$colnames_csv" '
-  BEGIN {
-    split(cnames, colname, ",")
-    for (i=1; i<=cols; i++) {
-      sample_count[i] = 0
-      mismatch[i] = 0
-      td_file[i] = sprintf("%s/%s_%s_mismatch_td.txt", logdir, job, colname[i])
-      bq_file[i] = sprintf("%s/%s_%s_mismatch_bq.txt", logdir, job, colname[i])
+# Column row comparison logic 
+
+awk -F"$SPLIT_DELIM" -v logdir="$LOG_DIR" -v job="$JOB" -v cnames="$colnames_csv" '
+BEGIN {
+  n = split(cnames, colname, ",")
+  for (i = 1; i <= n; i++) {
+    if (length(colname[i]) == 0) {
+      # Skip empty column name
+      continue
+    }
+    td_file[i] = sprintf("%s/%s_%s_mismatch_td.txt", logdir, job, colname[i])
+    bq_file[i] = sprintf("%s/%s_%s_mismatch_bq.txt", logdir, job, colname[i])
+  }
+}
+NR==FNR {
+  for (i = 1; i <= NF; i++) {
+    td_rows[FNR, i] = $i
+  }
+  next
+}
+{
+  row_num = FNR  # For BQ file
+  for (i = 1; i <= NF; i++) {
+    if (!(i in td_file)) continue  # Skip if filename was not created
+    if ($i != td_rows[row_num, i]) {
+      print "Row " row_num+1 ": " td_rows[row_num, i] >> td_file[i]
+      print "Row " row_num+1 ": " $i >> bq_file[i]
     }
   }
-  {
-    for (i=1; i<=cols; i++) {
-      if ($i != $(i+cols)) {
-        mismatch[i] = 1
-          row_num = FNR + 1 # account for header line
-          td_samples[i,sample_count[i]] = "Row " row_num ": " $i
-          bq_samples[i,sample_count[i]] = "Row " row_num ": " $(i+cols)
-          sample_count[i]++
-      }
-    }
-  }
-  END {
-    for (i=1; i<=cols; i++) {
-      if (mismatch[i]) {
-        td_out = td_file[i]
-        bq_out = bq_file[i]
-        for (j=0; j<sample_count[i]; j++) {
-          print td_samples[i,j] > td_out
-          print bq_samples[i,j] > bq_out
-        }
-        close(td_out)
-        close(bq_out)
-      } else {
-        # create empty mismatch files to keep consistency
-        close(td_file[i])
-        close(bq_file[i])
-      }
-    }
-  }
-  '
+}
+' "$TD_TEMP" "$BQ_TEMP"
 
   # Determine passed/mismatched columns based on files created
   for ((i=1; i<=td_col_count; i++)); do
@@ -561,4 +613,16 @@ cat >> "$COLUMN_DETAIL_HTML" <<EOF
 EOF
 
 log "Column detail HTML generated: $COLUMN_DETAIL_HTML"
+
+END_TS=$(date +%s)
+ELAPSED=$((END_TS - START_TS))
+
+if [[ $ELAPSED -lt 60 ]]; then
+  log "Validation completed in ${ELAPSED} seconds"
+else
+  mins=$((ELAPSED / 60))
+  secs=$((ELAPSED % 60))
+  log "Validation completed in ${mins} minutes, ${secs} seconds"
+fi
+
 log "========== Script complete =========="
