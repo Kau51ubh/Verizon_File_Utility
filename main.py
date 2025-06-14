@@ -14,15 +14,14 @@ def compare_files(request):
         file2 = data["file2"]
         delimiter = data.get("delimiter", ",")
         widths = data.get("widths", "")
+        htc = data.get("htc", "")  # New HTC param
         timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-        # Extra logging for Cloud Run debug!
         print("DEBUG: ENV:", dict(os.environ))
         print("DEBUG: Files in /:", os.listdir("/"))
         print("DEBUG: Files in /workspace:", os.listdir("/workspace"))
-        print(f"DEBUG: Running script with: job_name={job_name}, file1={file1}, file2={file2}, delimiter={delimiter}, widths={widths}, timestamp={timestamp}")
+        print(f"DEBUG: Running script with: job_name={job_name}, file1={file1}, file2={file2}, delimiter={delimiter}, widths={widths}, htc={htc}, timestamp={timestamp}")
 
-        # Optionally check if files exist on mount (optional, since shell will check)
         td_full = f"/mnt/bucket_td/{file1}"
         bq_full = f"/mnt/bucket_bq/{file2}"
         print(f"DEBUG: TD file exists? {os.path.exists(td_full)} {td_full}")
@@ -49,7 +48,7 @@ def compare_files(request):
         script = "/workspace/Falcon_DS.sh"
         cmd = [
             "bash", script,
-            job_name, file1, file2, delimiter, widths, timestamp
+            job_name, file1, file2, delimiter, widths, htc, timestamp  # <-- Added htc
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         print("DEBUG: SCRIPT STDOUT:", proc.stdout)
@@ -62,7 +61,6 @@ def compare_files(request):
             "html_summary": ""
         }
 
-        # Look for HTML summary
         for line in proc.stdout.splitlines():
             if "HTML Summary generated:" in line:
                 path = line.split(":", 1)[1].strip()
@@ -75,7 +73,7 @@ def compare_files(request):
 
     except Exception as e:
         print("DEBUG: Exception:", str(e))
-        traceback.print_exc()  # <-- This prints the whole Python traceback!
+        traceback.print_exc()
         return (json.dumps({
             "status": "failed",
             "message": str(e)

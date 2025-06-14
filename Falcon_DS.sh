@@ -8,7 +8,9 @@ TD_FILE="${2:-N/A}"
 BQ_FILE="${3:-N/A}"
 DELIM="${4:-}"
 WIDTHS="${5:-}"
-TS="${6:-}"
+HTC="${6:-}"  # New HTC param
+TS="${7:-}"
+
 
 TD_PATH="/mnt/bucket_td/$TD_FILE"
 BQ_PATH="/mnt/bucket_bq/$BQ_FILE"
@@ -29,15 +31,54 @@ echo "TD File    : $TD_FILE"
 echo "BQ File    : $BQ_FILE"
 echo "Delimiter  : $DELIM"
 echo "Widths     : $WIDTHS"
+echo "HTC Config : $HTC"
 echo "Timestamp  : $TS"
 
 # ----------- FILE EXISTENCE -----------
 ls -lh "$TD_PATH"
 ls -lh "$BQ_PATH"
 
-# ----------- READ HEADERS -------------
-td_header=$(head -1 "$TD_PATH" | tr -d '\r\n')
-bq_header=$(head -1 "$BQ_PATH" | tr -d '\r\n')
+# ----------- HTC DECODE --------------
+IFS='|' read -r HAS_HEADER HAS_TRAILER HAS_COLNAMES <<< "$HTC"
+
+# Normalize blank/undefined to N
+HAS_HEADER=${HAS_HEADER:-N}
+HAS_TRAILER=${HAS_TRAILER:-N}
+HAS_COLNAMES=${HAS_COLNAMES:-N}
+
+# Determine start line and end offset for TRIM
+TD_SKIP=1
+BQ_SKIP=1
+[[ "$HAS_HEADER" == "Y" ]] && ((TD_SKIP++)) && ((BQ_SKIP++))
+[[ "$HAS_COLNAMES" == "Y" ]] && ((TD_SKIP++)) && ((BQ_SKIP++))
+
+TD_LINES=$(wc -l < "$TD_PATH")
+BQ_LINES=$(wc -l < "$BQ_PATH")
+TD_TAIL=0
+BQ_TAIL=0
+[[ "$HAS_TRAILER" == "Y" ]] && ((TD_TAIL=1)) && ((BQ_TAIL=1))
+
+TD_TRIM="$LOG_DIR/TD_TRIM.txt"
+BQ_TRIM="$LOG_DIR/BQ_TRIM.txt"
+
+if [[ $TD_TAIL -eq 1 ]]; then
+  head -n $((TD_LINES - TD_TAIL)) "$TD_PATH" | tail -n +$TD_SKIP > "$TD_TRIM"
+else
+  tail -n +$TD_SKIP "$TD_PATH" > "$TD_TRIM"
+fi
+
+if [[ $BQ_TAIL -eq 1 ]]; then
+  head -n $((BQ_LINES - BQ_TAIL)) "$BQ_PATH" | tail -n +$BQ_SKIP > "$BQ_TRIM"
+else
+  tail -n +$BQ_SKIP "$BQ_PATH" > "$BQ_TRIM"
+fi
+
+# Extract headers from files (adjusted for HAS_HEADER + HAS_COLNAMES)
+TD_HEADER_LINE=1
+BQ_HEADER_LINE=1
+[[ "$HAS_HEADER" == "Y" ]] && ((TD_HEADER_LINE++)) && ((BQ_HEADER_LINE++))
+td_header=$(sed -n "${TD_HEADER_LINE}p" "$TD_PATH" | tr -d '\r\n')
+bq_header=$(sed -n "${BQ_HEADER_LINE}p" "$BQ_PATH" | tr -d '\r\n')
 
 # --------- Universal delimiter handling ---------
 if [[ "$DELIM" == "\\t" ]]; then
@@ -54,9 +95,26 @@ else
   SPLIT_DELIM="$DELIM"
 fi
 
-# ----------- EXTRACT COLUMNS -----------
-IFS=$'\n' read -d '' -r -a td_cols < <(echo "$td_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
-IFS=$'\n' read -d '' -r -a bq_cols < <(echo "$bq_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
+# Determine column names
+td_cols=()
+bq_cols=()
+
+if [[ "$HAS_COLNAMES" == "Y" ]]; then
+  # Extract headers from header line
+  IFS=$'\n' read -d '' -r -a td_cols < <(echo "$td_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
+  IFS=$'\n' read -d '' -r -a bq_cols < <(echo "$bq_header_fixed" | awk -F"$SPLIT_DELIM" '{for(i=1;i<=NF;i++)print $i}' ; printf '\0')
+else
+  # Generate dummy columns from first data row
+  td_col_count=$(head -1 "$TD_TRIM" | awk -F"$SPLIT_DELIM" '{print NF}')
+  bq_col_count=$(head -1 "$BQ_TRIM" | awk -F"$SPLIT_DELIM" '{print NF}')
+  for ((i=1; i<=td_col_count; i++)); do
+    colname="COL$i"
+    td_cols+=("$colname")
+    bq_cols+=("$colname")
+  done
+fi
+
+# Now assign column count correctly after array creation
 td_col_count=${#td_cols[@]}
 bq_col_count=${#bq_cols[@]}
 
@@ -66,8 +124,8 @@ echo "TD col count: $td_col_count"
 echo "BQ col count: $bq_col_count"
 
 # ----------- ROW COUNTS ---------------
-TD_ROWS=$(awk 'END{print NR-1}' "$TD_PATH")
-BQ_ROWS=$(awk 'END{print NR-1}' "$BQ_PATH")
+TD_ROWS=$(awk 'END{print NR-1}' "$TD_TRIM")
+BQ_ROWS=$(awk 'END{print NR-1}' "$BQ_TRIM")
 
 # ----------- FIND MISSING COLUMNS ------
 td_missing=""
@@ -99,10 +157,40 @@ else
     COUNT_VAR=$(awk -v td="$TD_ROWS" -v bq="$BQ_ROWS" 'BEGIN{printf "%.2f%%", ((td-bq)/td)*100}')
 fi
 
-# ----------- HEADER/COL VALIDATION -----
-HEADER_VAL="PASS"
-if [[ "$td_header" != "$bq_header" ]]; then
-  HEADER_VAL="FAIL"
+# Default validations
+HEADER_VAL="N/A"
+TRAILER_VAL="N/A"
+COLUMN_VAL="N/A"
+
+# ----------- HEADER VALIDATION ----------
+if [[ "$HAS_HEADER" == "Y" ]]; then
+  hdr_td=$(sed -n '1p' "$TD_PATH" | grep -E "^HDR" || true)
+  hdr_bq=$(sed -n '1p' "$BQ_PATH" | grep -E "^HDR" || true)
+  if [[ -n "$hdr_td" && -n "$hdr_bq" && "$hdr_td" == "$hdr_bq" ]]; then
+    HEADER_VAL="PASS"
+  else
+    HEADER_VAL="FAIL"
+  fi
+fi
+
+# ----------- TRAILER VALIDATION ----------
+if [[ "$HAS_TRAILER" == "Y" ]]; then
+  trl_td=$(tail -n 1 "$TD_PATH" | grep -i 'Trailer' || true)
+  trl_bq=$(tail -n 1 "$BQ_PATH" | grep -i 'Trailer' || true)
+  if [[ -n "$trl_td" && -n "$trl_bq" && "$trl_td" == "$trl_bq" ]]; then
+    TRAILER_VAL="PASS"
+  else
+    TRAILER_VAL="FAIL"
+  fi
+fi
+
+# ----------- COLUMN VALIDATION ----------
+if [[ "$HAS_COLNAMES" == "Y" ]]; then
+  if [[ "$td_header" == "$bq_header" ]]; then
+    COLUMN_VAL="PASS"
+  else
+    COLUMN_VAL="FAIL"
+  fi
 fi
 
 COUNT_VAL="PASS"
@@ -119,8 +207,8 @@ if [[ "$td_ext" != "$bq_ext" ]]; then
 fi
 
 # ----------- FAST FILE CHECKSUM VALIDATION -----------
-TD_FILE_CHK=$(cksum "$TD_PATH" | awk '{print $1}')
-BQ_FILE_CHK=$(cksum "$BQ_PATH" | awk '{print $1}')
+TD_FILE_CHK=$(cksum "$TD_TRIM" | awk '{print $1}')
+BQ_FILE_CHK=$(cksum "$BQ_TRIM" | awk '{print $1}')
 FAST_CHECKSUM_MATCHED=0
 CHECKSUM_VAL="N/A"
 
@@ -142,12 +230,12 @@ if [[ $FAST_CHECKSUM_MATCHED -eq 0 && $td_col_count -eq $bq_col_count && $TD_ROW
   BQ_TEMP="${LOG_DIR}/BQ_TEMP_DATA.txt"
 
   if [[ ${#DELIM} -gt 1 ]]; then
-    tail -n +2 "$TD_PATH" | sed "s|${DELIM}|	|g" > "$TD_TEMP"
-    tail -n +2 "$BQ_PATH" | sed "s|${DELIM}|	|g" > "$BQ_TEMP"
+    tail -n +2 "$TD_TRIM" | sed "s|${DELIM}|	|g" > "$TD_TEMP"
+    tail -n +2 "$BQ_TRIM" | sed "s|${DELIM}|	|g" > "$BQ_TEMP"
     SPLIT_DELIM=$'\t'
   else
-    tail -n +2 "$TD_PATH" > "$TD_TEMP"
-    tail -n +2 "$BQ_PATH" > "$BQ_TEMP"
+    tail -n +2 "$TD_TRIM" > "$TD_TEMP"
+    tail -n +2 "$BQ_TRIM" > "$BQ_TEMP"
     SPLIT_DELIM="$DELIM"
   fi
 
@@ -228,7 +316,7 @@ MISMATCHED_COLUMNS_WITH_COUNTS=$(IFS=, ; echo "${mismatched_columns_with_counts[
 
 # ----------- STATUS AGGREGATE ----------
 STATUS="PASS"
-for s in "$HEADER_VAL" "$COUNT_VAL" "$FILE_EXT_VAL" "$CHECKSUM_VAL"; do
+for s in "$COUNT_VAL" "$FILE_EXT_VAL" "$CHECKSUM_VAL"; do
     if [[ "$s" == "FAIL" ]]; then
         STATUS="FAIL"
         break
@@ -245,6 +333,8 @@ cat <<EOF > "$SUMMARY_HTML"
 <tr><th>BQ Row Count | Column Count | Missing Columns</th><td>$BQ_ROWS | $bq_col_count | $td_missing</td></tr>
 <tr><th>Count Variance</th><td>$COUNT_VAR</td></tr>
 <tr><th>Header Validation</th><td>$HEADER_VAL</td></tr>
+<tr><th>Trailer Validation</th><td>$TRAILER_VAL</td></tr>
+<tr><th>Column Validation</th><td>$COLUMN_VAL</td></tr>
 <tr><th>Count Validation</th><td>$COUNT_VAL</td></tr>
 <tr><th>File Extension Validation</th><td>$FILE_EXT_VAL</td></tr>
 <tr><th>Checksum Validation</th><td>$CHECKSUM_VAL</td></tr>
