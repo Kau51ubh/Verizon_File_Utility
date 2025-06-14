@@ -11,6 +11,9 @@ WIDTHS="${5:-}"
 HTC="${6:-}"  # New HTC param
 TS="${7:-}"
 
+log() {
+  echo "$JOB : $1"
+}
 
 TD_PATH="/mnt/bucket_td/$TD_FILE"
 BQ_PATH="/mnt/bucket_bq/$BQ_FILE"
@@ -22,17 +25,17 @@ MAX_SAMPLE=10
 
 FILENAME=$(basename "$TD_FILE")
 
-echo "========== Script start =========="
-echo "PWD: $PWD"
-echo "USER: $(whoami)"
-echo "ARGS: $*"
-echo "Job Name   : $JOB"
-echo "TD File    : $TD_FILE"
-echo "BQ File    : $BQ_FILE"
-echo "Delimiter  : $DELIM"
-echo "Widths     : $WIDTHS"
-echo "HTC Config : $HTC"
-echo "Timestamp  : $TS"
+log "========== Script start =========="
+log "PWD: $PWD"
+log "USER: $(whoami)"
+log "ARGS: $*"
+log "Job Name   : $JOB"
+log "TD File    : $TD_FILE"
+log "BQ File    : $BQ_FILE"
+log "Delimiter  : $DELIM"
+log "Widths     : $WIDTHS"
+log "HTC Config : $HTC"
+log "Timestamp  : $TS"
 
 # ----------- FILE EXISTENCE -----------
 ls -lh "$TD_PATH"
@@ -118,10 +121,10 @@ fi
 td_col_count=${#td_cols[@]}
 bq_col_count=${#bq_cols[@]}
 
-echo "TD header: $td_header"
-echo "BQ header: $bq_header"
-echo "TD col count: $td_col_count"
-echo "BQ col count: $bq_col_count"
+# log "TD header: $td_header"
+# log "BQ header: $bq_header"
+# log "TD col count: $td_col_count"
+# log "BQ col count: $bq_col_count"
 
 # ----------- ROW COUNTS ---------------
 TD_ROWS=$(awk 'END{print NR-1}' "$TD_TRIM")
@@ -323,6 +326,23 @@ for s in "$COUNT_VAL" "$FILE_EXT_VAL" "$CHECKSUM_VAL"; do
     fi
 done
 
+log "========== Summary  =========="
+log "Job Name: $JOB"
+log "File Name: $FILENAME"
+log "TD Row Count | Column Count | Missing Columns: $TD_ROWS | $td_col_count | $bq_missing"
+log "BQ Row Count | Column Count | Missing Columns: $BQ_ROWS | $bq_col_count | $td_missing"
+log "Count Variance: $COUNT_VAR"
+log "Header Validation: $HEADER_VAL"
+log "Trailer Validation: $TRAILER_VAL"
+log "Column Validation: $COLUMN_VAL"
+log "Count Validation: $COUNT_VAL"
+log "File Extension Validation: $FILE_EXT_VAL"
+log "Checksum Validation: $CHECKSUM_VAL"
+log "Validation Status: $STATUS"
+log "Passed Columns: $PASSED_COLUMNS"
+log "Mismatched Columns: $MISMATCHED_COLUMNS_WITH_COUNTS"
+log "=============================="
+
 # ----------- WRITE SUMMARY HTML -----------
 cat <<EOF > "$SUMMARY_HTML"
 <html><body>
@@ -345,7 +365,7 @@ cat <<EOF > "$SUMMARY_HTML"
 </body></html>
 EOF
 
-echo "HTML Summary generated: $SUMMARY_HTML"
+log "HTML Summary generated: $SUMMARY_HTML"
 
 # ----------- WRITE COLUMN DETAIL HTML -----------
 cat <<EOT > "$COLUMN_DETAIL_HTML"
