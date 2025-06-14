@@ -3,12 +3,36 @@ from airflow.utils.dates import days_ago
 from airflow.providers.http.operators.http import HttpOperator
 from airflow.operators.python import PythonOperator
 from bs4 import BeautifulSoup
+from google.auth.transport.requests import Request
+from google.oauth2 import id_token
+import requests
 
 default_args = {
     "owner": "airflow",
     "start_date": days_ago(1),
     "retries": 0,
 }
+
+def invoke_cloud_run(**context):
+    import json
+
+    payload = context["dag_run"].conf or {}
+    service_url = "https://compare-files-463031084485.us-central1.run.app/"
+
+    # Generate ID token for Cloud Run
+    target_audience = service_url
+    auth_req = Request()
+    token = id_token.fetch_id_token(auth_req, target_audience)
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(service_url, headers=headers, json=payload)
+    response.raise_for_status()
+
+    return response.json()
 
 def extract_and_log_summary(**context):
     import sys
@@ -99,16 +123,22 @@ with DAG(
     tags=["gcs", "file-compare"],
 ) as dag:
 
-    invoke_function = HttpOperator(
+    #invoke_function = HttpOperator(
+    #    task_id='invoke_compare_function',
+    #    http_conn_id='compare_func_http',
+    #    endpoint='/',
+    #    method='POST',
+    #    headers={"Content-Type":"application/json"},
+    #    data="{{ dag_run.conf | tojson }}",
+    #    response_filter=lambda r: r.json(),
+    #    log_response=True,
+    #    do_xcom_push=True,
+    #)
+	
+    invoke_function = PythonOperator(
         task_id='invoke_compare_function',
-        http_conn_id='compare_func_http',
-        endpoint='/',
-        method='POST',
-        headers={"Content-Type":"application/json"},
-        data="{{ dag_run.conf | tojson }}",
-        response_filter=lambda r: r.json(),
-        log_response=True,
-        do_xcom_push=True,
+        python_callable=invoke_cloud_run,
+        provide_context=True,
     )
 
     extract_summary = PythonOperator(
