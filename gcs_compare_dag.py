@@ -62,7 +62,7 @@ def extract_and_log_summary(**context):
         log.info("No HTML summary returned. Raw XCom: %s", resp)
         for field in [
             "Job Name", "File Name", "TD Row Count | Column Count | Missing Columns",
-            "BQ Row Count | Column Count | Missing Columns", "Count Variance", "Header Validation",
+            "BQ Row Count | Column Count | Missing Columns", "Count Variance", "Header Validation","Trailer Validation","Column Validation",
             "Count Validation", "File Extension Validation", "Checksum Validation", "Status",
             "Passed Columns", "Mismatched Columns"
         ]:
@@ -101,6 +101,8 @@ def extract_and_log_summary(**context):
         ("BQ Row Count | Column Count | Missing Columns", summary.get("BQ Row Count | Column Count | Missing Columns", "N/A")),
         ("Count Variance", summary.get("Count Variance", "N/A")),
         ("Header Validation", status_color(summary.get("Header Validation", "N/A"))),
+        ("Trailer Validation", status_color(summary.get("Trailer Validation", "N/A"))),
+        ("Column Validation", status_color(summary.get("Column Validation", "N/A"))),
         ("Count Validation", status_color(summary.get("Count Validation", "N/A"))),
         ("File Extension Validation", status_color(summary.get("File Extension Validation", "N/A"))),
         ("Checksum Validation", status_color(summary.get("Checksum Validation", "N/A"))),
