@@ -30,7 +30,7 @@ def compare_files(request):
             with open(td_full) as f:
                 lines = []
                 try:
-                    for _ in range(2):
+                    for _ in range(1):
                         lines.append(next(f).rstrip('\n'))
                 except StopIteration:
                     pass
@@ -39,7 +39,7 @@ def compare_files(request):
             with open(bq_full) as f:
                 lines = []
                 try:
-                    for _ in range(2):
+                    for _ in range(1):
                         lines.append(next(f).rstrip('\n'))
                 except StopIteration:
                     pass
