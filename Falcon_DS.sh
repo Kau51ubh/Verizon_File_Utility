@@ -637,26 +637,29 @@ from openpyxl.styles import PatternFill
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 import os
+from google.cloud import storage
 
+# Inputs from shell
 log_dir = "$LOG_DIR"
 job = "$JOB"
 td_temp = "$TD_TEMP"
 bq_temp = "$BQ_TEMP"
 colnames = "$colnames_csv".split(',')
 
+# Read files
 df_td = pd.read_csv(td_temp, sep="$SPLIT_DELIM", header=None, names=colnames, dtype=str, keep_default_na=False)
 df_bq = pd.read_csv(bq_temp, sep="$SPLIT_DELIM", header=None, names=colnames, dtype=str, keep_default_na=False)
 
+# Identify mismatches
 mismatch_mask = (df_td != df_bq)
 rows_to_keep = mismatch_mask.any(axis=1)
-
 df_td_filtered = df_td[rows_to_keep].copy()
 df_bq_filtered = df_bq[rows_to_keep].copy()
 mask_filtered = mismatch_mask[rows_to_keep]
 
+# Excel setup
 wb = Workbook()
 wb.remove(wb.active)
-
 highlight = PatternFill(start_color='FF9999', end_color='FF9999', fill_type='solid')
 
 def add_sheet(ws, df, highlight_mask):
@@ -672,8 +675,21 @@ add_sheet(ws_td, df_td_filtered, mask_filtered)
 ws_bq = wb.create_sheet(title="BQ_Mismatches")
 add_sheet(ws_bq, df_bq_filtered, mask_filtered)
 
-excel_path = os.path.join(log_dir, f"{job}_mismatches_highlighted.xlsx")
+# Save Excel
+excel_filename = f"{job}_mismatches_highlighted.xlsx"
+excel_path = os.path.join(log_dir, excel_filename)
 wb.save(excel_path)
+
+# Upload to GCS with correct MIME type
+bucket_name = os.environ.get("GCS_BUCKET_BQ", "").replace("gs://", "").strip()
+
+if not bucket_name:
+    raise ValueError("GCS_BUCKET_BQ environment variable is empty or invalid.")
+
+client = storage.Client()
+bucket = client.bucket(bucket_name)
+blob = bucket.blob(f"logs/{job}/HTML/{excel_filename}")
+blob.upload_from_filename(excel_path, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 EOF
 
   log "Excel mismatch summary created: ${LOG_DIR}/${JOB}_mismatches_highlighted.xlsx"
