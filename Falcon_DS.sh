@@ -417,6 +417,8 @@ cat <<EOF > "$SUMMARY_HTML"
 </body></html>
 EOF
 
+echo "HTML Summary generated: $SUMMARY_HTML"
+
 log "HTML Summary generated: $SUMMARY_HTML"
 
 # ----------- WRITE COLUMN DETAIL HTML -----------
