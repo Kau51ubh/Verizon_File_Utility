@@ -627,4 +627,56 @@ else
   log "Validation completed in ${mins} minutes, ${secs} seconds"
 fi
 
+# ----------- GENERATE EXCEL WITH ALL MISMATCHED ROWS IN CONTEXT -----------
+if [[ ${#mismatched_columns[@]} -gt 0 ]]; then
+  log "Generating Excel summary with all mismatched rows"
+
+  python3 - <<EOF
+import pandas as pd
+from openpyxl.styles import PatternFill
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+import os
+
+log_dir = "$LOG_DIR"
+job = "$JOB"
+td_temp = "$TD_TEMP"
+bq_temp = "$BQ_TEMP"
+colnames = "$colnames_csv".split(',')
+
+df_td = pd.read_csv(td_temp, sep="$SPLIT_DELIM", header=None, names=colnames, dtype=str, keep_default_na=False)
+df_bq = pd.read_csv(bq_temp, sep="$SPLIT_DELIM", header=None, names=colnames, dtype=str, keep_default_na=False)
+
+mismatch_mask = (df_td != df_bq)
+rows_to_keep = mismatch_mask.any(axis=1)
+
+df_td_filtered = df_td[rows_to_keep].copy()
+df_bq_filtered = df_bq[rows_to_keep].copy()
+mask_filtered = mismatch_mask[rows_to_keep]
+
+wb = Workbook()
+wb.remove(wb.active)
+
+highlight = PatternFill(start_color='FF9999', end_color='FF9999', fill_type='solid')
+
+def add_sheet(ws, df, highlight_mask):
+    for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), 1):
+        for c_idx, val in enumerate(row, 1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=val)
+            if r_idx > 1 and highlight_mask.iat[r_idx-2, c_idx-1]:
+                cell.fill = highlight
+
+ws_td = wb.create_sheet(title="TD_Mismatches")
+add_sheet(ws_td, df_td_filtered, mask_filtered)
+
+ws_bq = wb.create_sheet(title="BQ_Mismatches")
+add_sheet(ws_bq, df_bq_filtered, mask_filtered)
+
+excel_path = os.path.join(log_dir, f"{job}_mismatches_highlighted.xlsx")
+wb.save(excel_path)
+EOF
+
+  log "Excel mismatch summary created: ${LOG_DIR}/${JOB}_mismatches_highlighted.xlsx"
+fi
+
 log "========== Script complete =========="
