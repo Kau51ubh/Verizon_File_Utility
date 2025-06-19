@@ -230,8 +230,8 @@ COLUMN_VAL="N/A"
 
 # ----------- HEADER VALIDATION ----------
 if [[ "$HAS_HEADER" == "Y" ]]; then
-  hdr_td=$(sed -n '1p' "$TD_PATH" | grep -E "^HDR" || true)
-  hdr_bq=$(sed -n '1p' "$BQ_PATH" | grep -E "^HDR" || true)
+  hdr_td=$(sed -n '1p' "$TD_PATH" || true)
+  hdr_bq=$(sed -n '1p' "$BQ_PATH" || true)
   if [[ -n "$hdr_td" && -n "$hdr_bq" && "$hdr_td" == "$hdr_bq" ]]; then
     HEADER_VAL="PASS"
   else
@@ -241,8 +241,8 @@ fi
 
 # ----------- TRAILER VALIDATION ----------
 if [[ "$HAS_TRAILER" == "Y" ]]; then
-  trl_td=$(tail -n 1 "$TD_PATH" | grep -i 'Trailer' || true)
-  trl_bq=$(tail -n 1 "$BQ_PATH" | grep -i 'Trailer' || true)
+  trl_td=$(tail -n 1 "$TD_PATH" || true)
+  trl_bq=$(tail -n 1 "$BQ_PATH" || true)
   if [[ -n "$trl_td" && -n "$trl_bq" && "$trl_td" == "$trl_bq" ]]; then
     TRAILER_VAL="PASS"
   else
@@ -631,7 +631,10 @@ fi
 if [[ ${#mismatched_columns[@]} -gt 0 ]]; then
   log "Generating Excel summary with all mismatched rows"
 
-  python3 - <<EOF
+  # Ensure these vars are available inside Python
+  export LOG_DIR JOB TD_TEMP BQ_TEMP colnames_csv SPLIT_DELIM GCS_BUCKET_BQ
+
+  python3 <<EOF
 import pandas as pd
 from openpyxl.styles import PatternFill
 from openpyxl import Workbook
@@ -639,57 +642,70 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 import os
 from google.cloud import storage
 
-# Inputs from shell
-log_dir = "$LOG_DIR"
-job = "$JOB"
-td_temp = "$TD_TEMP"
-bq_temp = "$BQ_TEMP"
-colnames = "$colnames_csv".split(',')
+# --- Inputs from shell ---
+log_dir    = os.environ["LOG_DIR"]
+job        = os.environ["JOB"]
+td_temp    = os.environ["TD_TEMP"]
+bq_temp    = os.environ["BQ_TEMP"]
+colnames   = os.environ["colnames_csv"].split(',')
+sep        = os.environ["SPLIT_DELIM"]
 
-# Read files
-df_td = pd.read_csv(td_temp, sep="$SPLIT_DELIM", header=None, names=colnames, dtype=str, keep_default_na=False)
-df_bq = pd.read_csv(bq_temp, sep="$SPLIT_DELIM", header=None, names=colnames, dtype=str, keep_default_na=False)
+# --- Read files ---
+df_td = pd.read_csv(td_temp, sep=sep, header=None, names=colnames, dtype=str, keep_default_na=False)
+df_bq = pd.read_csv(bq_temp, sep=sep, header=None, names=colnames, dtype=str, keep_default_na=False)
 
-# Identify mismatches
-mismatch_mask = (df_td != df_bq)
-rows_to_keep = mismatch_mask.any(axis=1)
-df_td_filtered = df_td[rows_to_keep].copy()
-df_bq_filtered = df_bq[rows_to_keep].copy()
-mask_filtered = mismatch_mask[rows_to_keep]
+# --- Identify mismatches ---
+mask      = df_td.ne(df_bq)
+rows      = mask.any(axis=1)
+df_td_f   = df_td[rows].copy()
+df_bq_f   = df_bq[rows].copy()
+mask_f    = mask[rows]
 
-# Excel setup
+# --- Build Excel workbook ---
 wb = Workbook()
 wb.remove(wb.active)
 highlight = PatternFill(start_color='FF9999', end_color='FF9999', fill_type='solid')
 
-def add_sheet(ws, df, highlight_mask):
-    for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), 1):
-        for c_idx, val in enumerate(row, 1):
+def add_sheet(ws, df, mask_df):
+    for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), start=1):
+        for c_idx, val in enumerate(row, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=val)
-            if r_idx > 1 and highlight_mask.iat[r_idx-2, c_idx-1]:
+            # highlight data rows where mask is True
+            if r_idx > 1 and mask_df.iat[r_idx-2, c_idx-1]:
                 cell.fill = highlight
 
 ws_td = wb.create_sheet(title="TD_Mismatches")
-add_sheet(ws_td, df_td_filtered, mask_filtered)
+add_sheet(ws_td, df_td_f, mask_f)
 
 ws_bq = wb.create_sheet(title="BQ_Mismatches")
-add_sheet(ws_bq, df_bq_filtered, mask_filtered)
+add_sheet(ws_bq, df_bq_f, mask_f)
 
-# Save Excel
+# --- Save Excel locally ---
 excel_filename = f"{job}_mismatches_highlighted.xlsx"
-excel_path = os.path.join(log_dir, excel_filename)
+excel_path     = os.path.join(log_dir, excel_filename)
 wb.save(excel_path)
 
-# Upload to GCS with correct MIME type
-bucket_name = os.environ.get("GCS_BUCKET_BQ", "").replace("gs://", "").strip()
+# --- Upload to GCS into the HTML folder under the same log dir ---
+bucket_uri = os.environ["GCS_BUCKET_BQ"].replace("gs://", "")
+client     = storage.Client()
+bucket     = client.bucket(bucket_uri)
 
-if not bucket_name:
-    raise ValueError("GCS_BUCKET_BQ environment variable is empty or invalid.")
+# Derive the GCS path from the mount path, e.g.
+# /mnt/bucket_bq/logs/MyJob_20250618_104108 -> logs/MyJob_20250618_104108
+rel_dir   = log_dir.replace("/mnt/bucket_bq/", "").rstrip("/")
+dest_blob = f"{rel_dir}/HTML/{excel_filename}"
 
-client = storage.Client()
-bucket = client.bucket(bucket_name)
-blob = bucket.blob(f"logs/{job}/HTML/{excel_filename}")
-blob.upload_from_filename(excel_path, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+blob = bucket.blob(dest_blob)
+blob.upload_from_filename(
+    excel_path,
+    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+# Ensure the download name is .xlsx
+blob.content_disposition = f'attachment; filename="{excel_filename}"'
+blob.patch()
+
+print(f"Excel mismatch summary created: {excel_path}")
 EOF
 
   log "Excel mismatch summary created: ${LOG_DIR}/${JOB}_mismatches_highlighted.xlsx"
