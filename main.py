@@ -1,3 +1,34 @@
+"""
+File: main.py
+Creator: Kaustubh Thakre
+Created: 2025-06-10
+Last Modified: 2025-06-22
+
+Description:
+This Python script is designed to be executed in a Google Cloud Run environment. It orchestrates
+the execution of a shell script that compares two input files stored in Google Cloud Storage (GCS).
+
+Workflow:
+- Receives runtime parameters via HTTP requests triggered from Cloud Composer (Airflow DAG).
+- Retrieves input files (e.g., TD and BQ extracts) from GCS buckets.
+- Executes a shell script to compare files and generate validation summaries.
+- Writes detailed validation outputs (HTML summary, Excel report, raw logs, column-wise mismatch details) back to a specified GCS bucket.
+- Sends minimal summary response (status and summary link) back to Composer logs for pipeline orchestration.
+
+Cloud Services Integration:
+- Google Cloud Composer (for workflow management and DAG orchestration)
+- Google Cloud Run (containerized execution environment)
+- Google Cloud Storage (storage for input/output files and logs)
+
+Dependencies:
+- functions-framework==3.*
+- google-cloud-storage
+- pandas
+- flask
+- openpyxl
+
+"""
+
 import os
 import subprocess
 import datetime
@@ -12,8 +43,8 @@ def compare_files(request):
         # Step 1: Extract request payload
         data = request.get_json(force=True)
         job_name = data.get("job_name", "Validation_Job")
-        file1 = data["file1"]
-        file2 = data["file2"]
+        TD_File = data["TD_File"]
+        BQ_File = data["BQ_File"]
         delimiter = data.get("delimiter", ",")
         widths = data.get("widths", "")
         htc = data.get("htc", "")
@@ -25,18 +56,18 @@ def compare_files(request):
         print("DEBUG: Files in /workspace:", os.listdir("/workspace"))
 
         # Step 3: Log input parameters
-        print(f"DEBUG: Running script with: job_name={job_name}, file1={file1}, file2={file2}, delimiter={delimiter}, widths={widths}, htc={htc}, timestamp={timestamp}")
+        print(f"DEBUG: Running script with: job_name={job_name}, TD_File={TD_File}, BQ_File={BQ_File}, delimiter={delimiter}, widths={widths}, htc={htc}, timestamp={timestamp}")
 
         # Step 4: Confirm TD and BQ file existence
-        td_full = f"/mnt/bucket_td/{file1}"
-        bq_full = f"/mnt/bucket_bq/{file2}"
+        td_full = f"/mnt/bucket_td/{TD_File}"
+        bq_full = f"/mnt/bucket_bq/{BQ_File}"
 
         print(f"DEBUG: TD file exists? {os.path.exists(td_full)} {td_full}")
         print(f"DEBUG: BQ file exists? {os.path.exists(bq_full)} {bq_full}")
 
         # Step 5: Run the shell script
-        script = "/workspace/Falcon_DS.sh"
-        cmd = ["bash", script, job_name, file1, file2, delimiter, widths, htc, timestamp]
+        script = "/workspace/Falcon.sh"
+        cmd = ["bash", script, job_name, TD_File, BQ_File, delimiter, widths, htc, timestamp]
         proc = subprocess.run(cmd, capture_output=True, text=True)
 
         print("DEBUG: SCRIPT completed with return code:", proc.returncode)
