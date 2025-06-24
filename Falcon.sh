@@ -764,5 +764,5 @@ EOF
 
   log "Excel mismatch summary created: ${LOG_DIR}/${JOB}_mismatches_highlighted.xlsx"
 fi
-
+rm ${LOG_DIR}/${JOB}_mismatches_highlighted.xlsx
 log "========== Script complete =========="
