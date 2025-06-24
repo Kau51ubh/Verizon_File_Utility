@@ -68,9 +68,9 @@ with DAG(
         'job_name':  'VZ_File_Validation',
         'TD_File':     'udm_rev1/TD File Name',
         'BQ_File':     'udm_rev1/BQ File Name',
-        'delimiter': '""',
-        'widths':    '""',
-        'htc':       '""',
+        'delimiter': '',
+        'widths':    '',
+        'htc':       '',
     },
     tags=['falcon', 'file-compare'],
 ) as dag:
