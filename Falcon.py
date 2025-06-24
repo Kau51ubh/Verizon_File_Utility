@@ -4,7 +4,7 @@ Creator: Kaustubh Thakre
 Created: 2025-06-10
 Last Modified: 2025-06-22
 
-Description:
+Description:
 This Apache Airflow DAG orchestrates the execution of a file-comparison workflow leveraging Google Cloud Platform (GCP) services. It primarily coordinates interactions between Airflow, Cloud Run, and Google Cloud Storage (GCS).
 
 Workflow Overview:
@@ -68,9 +68,9 @@ with DAG(
         'job_name':  'VZ_File_Validation',
         'TD_File':     'udm_rev1/TD File Name',
         'BQ_File':     'udm_rev1/BQ File Name',
-        'delimiter': '',
-        'widths':    '',
-        'htc':       '',
+        'delimiter': '""',
+        'widths':    '""',
+        'htc':       '""',
     },
     tags=['falcon', 'file-compare'],
 ) as dag:
@@ -107,11 +107,18 @@ with DAG(
         resp = ti.xcom_pull(task_ids='invoke_compare') or {}
         html = resp.get('html_summary', '')
         log  = ti.log
+		
+        BLUE_BG = "\033[44;97;1m"
+        ENDC = "\033[0m"
+        BOLD = "\033[1m"
+		
+        HEADER = f"{BLUE_BG}  ★★  GCS FILE COMPARISON SUMMARY  ★★  {ENDC}"
+		# Pretty summary bar
+        bar = f"{BOLD}{'=' * 70}{ENDC}"
 
-        sep = '=' * 70
-        log.info(sep)
-        log.info('★★ GCS FILE COMPARISON SUMMARY ★★')
-        log.info(sep)
+        log.info(bar)
+        log.info(HEADER)
+        log.info(bar)
 
         if not html:
             log.error('No HTML summary returned!')
@@ -141,8 +148,8 @@ with DAG(
             v = summary.get(k, 'N/A')
             if 'Validation' in k or k=='Status':
                 v = status_color(v)
-            log.info(f"{k:45}: {v}")
-        log.info(sep)
+            log.info(f"{BOLD}{k:45}:{ENDC} {v}")
+        log.info(bar)
 
     extract_summary_op = PythonOperator(
         task_id='extract_and_log_summary',
