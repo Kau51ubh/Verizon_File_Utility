@@ -106,8 +106,8 @@ HAS_TRAILER=${HAS_TRAILER:-N}
 HAS_COLNAMES=${HAS_COLNAMES:-N}
 
 # Determine start line and end offset for TRIM
-TD_SKIP=1
-BQ_SKIP=1
+TD_SKIP=0
+BQ_SKIP=0
 [[ "$HAS_HEADER" == "Y" ]] && ((TD_SKIP++)) && ((BQ_SKIP++))
 [[ "$HAS_COLNAMES" == "Y" ]] && ((TD_SKIP++)) && ((BQ_SKIP++))
 
@@ -132,6 +132,10 @@ if [[ $BQ_TAIL -eq 1 ]]; then
 else
   tail -n +$BQ_SKIP "$BQ_PATH" > "$BQ_TRIM"
 fi
+
+# SORT TRIMMED FILES FOR DETERMINISTIC ROW ALIGNMENT
+sort "$TD_TRIM" -o "$TD_TRIM"
+sort "$BQ_TRIM" -o "$BQ_TRIM"
 
 # Then: apply fixed-width parsing if WIDTHS is provided
 if [[ -n "$WIDTHS" ]]; then
